@@ -430,7 +430,7 @@ function ManageJobPageInner({
         .select("last_job_id")
         .eq("id", 1)
         .single();
-      const nextJobId = (counterRow?.last_job_id || 28101) + 1;
+      const nextJobId = (counterRow?.last_job_id || 0) + 1;
       setJobCode(String(nextJobId));  // e.g. 28101 → "28102"
     };
     genCode();

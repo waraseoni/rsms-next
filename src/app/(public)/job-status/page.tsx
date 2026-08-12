@@ -167,7 +167,7 @@ export default function JobStatusPage() {
                   type="text"
                   value={search}
                   onChange={e => setSearch(e.target.value)}
-                  placeholder={searchType === "job_id" ? "Enter Job ID (e.g. 27950)" : "Enter Repair Code (e.g. 2026032001)"}
+                  placeholder={searchType === "job_id" ? "Enter Job ID" : "Enter Repair Code"}
                   className="flex-1 min-w-0 px-4 py-3.5 rounded-2xl bg-white/[0.04] border border-white/[0.1] text-sm text-white font-medium placeholder:text-slate-600 outline-none focus:border-blue-500/60 focus:ring-1 focus:ring-blue-500/20 transition-all"
                 />
                 <button type="submit" disabled={loading}
@@ -177,10 +177,27 @@ export default function JobStatusPage() {
                 </button>
               </form>
 
-              <p className="text-[11px] text-slate-600 mt-4">
-                E.g. Job ID <button onClick={() => { setSearch("27950"); setSearchType("job_id"); }} className="text-blue-400 hover:underline">27950</button> ya Code{" "}
-                <button onClick={() => { setSearch("2026032001"); setSearchType("code"); }} className="text-blue-400 hover:underline">2026032001</button>
-              </p>
+              {/* WhatsApp Info Message */}
+              <div className="mt-6 rounded-2xl p-5 bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 border border-emerald-500/20">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 shrink-0 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center">
+                    <span className="text-xl">📱</span>
+                  </div>
+                  <div className="flex-1">
+                    <h3 className="font-bold text-emerald-300 text-sm mb-2">WhatsApp Message se Job Status Check Karein</h3>
+                    <p className="text-[13px] text-slate-400 leading-relaxed">
+                      Aapke WhatsApp par job status ke message me aapko apna <span className="text-white font-semibold">Job ID</span> aur <span className="text-white font-semibold">Code</span> dono diya gaya hai. Dono me se kisi bhi ek use karke apne job ki details search kar sakte hain.
+                    </p>
+                    <div className="mt-3 p-3 rounded-xl bg-black/30 border border-white/5">
+                      <p className="text-[11px] text-slate-500 font-semibold uppercase tracking-wider mb-2">WhatsApp Message Example:</p>
+                      <div className="text-[12px] text-slate-300 font-mono leading-relaxed">
+                        <p>Job ID: <span className="text-emerald-400">#1</span></p>
+                        <p>Code: <span className="text-cyan-400">#2026081301</span></p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Recent Jobs for reference */}

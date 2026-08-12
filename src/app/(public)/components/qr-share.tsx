@@ -3,13 +3,20 @@
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { QrCode, X, Copy, Check, Share2, Smartphone, MessageCircle, Send, Mail, ArrowLeft, Globe, AtSign, Download } from "lucide-react";
-import { SITE } from "../site";
+import { SITE, getSiteInfo } from "../site";
 
 export function QrShareModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [siteUrl, setSiteUrl] = useState("");
   const [copied, setCopied] = useState(false);
   const [pickShareOpen, setPickShareOpen] = useState(false);
+  const [siteInfo, setSiteInfo] = useState<any>(null);
+
+  useEffect(() => {
+    getSiteInfo().then(data => setSiteInfo(data));
+  }, []);
+
+  const displayInfo = siteInfo || SITE;
 
   useEffect(() => {
     if (!open) return;
@@ -73,7 +80,7 @@ export function QrShareModal({ open, onClose }: { open: boolean; onClose: () => 
     if (!siteUrl) return;
     if (navigator.share) {
       const textData: ShareData = {
-        title: `${SITE.name} — Website`,
+        title: `${displayInfo.shop_name || SITE.name} — Website`,
         text: "Scan karke website kholo ya link par tap karo. Repair & Service Experts, Jabalpur.",
         url: siteUrl,
       };
@@ -109,7 +116,7 @@ export function QrShareModal({ open, onClose }: { open: boolean; onClose: () => 
     { key: "x",    name: "X / Twitter", color: "#94a3b8", icon: <AtSign size={18} />,
       href: () => `https://twitter.com/intent/tweet?text=${encodeURIComponent(shareMsg().text)}&url=${encodeURIComponent(shareMsg().url)}` },
     { key: "mail", name: "Email", color: "#ea4335", icon: <Mail size={18} />,
-      href: () => `mailto:?subject=${encodeURIComponent(`${SITE.name} — Website`)}&body=${encodeURIComponent(`${shareMsg().text}\n${shareMsg().url}`)}` },
+      href: () => `mailto:?subject=${encodeURIComponent(`${displayInfo.shop_name || SITE.name} — Website`)}&body=${encodeURIComponent(`${shareMsg().text}\n${shareMsg().url}`)}` },
   ];
 
   return (
