@@ -106,6 +106,7 @@ backups/
 # 17. Misc sensitive txt files
 *.7z
 db folder/
+env_store/
 
 # 18. Client packages & per-client secrets (generate karo, kabhi push mat karo)
 packages/
