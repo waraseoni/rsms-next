@@ -69,7 +69,12 @@ export async function GET() {
 
     if (activated && activationId) {
       const lastChecked = lastCheckedRaw ? new Date(lastCheckedRaw).getTime() : 0;
-      const due = !lastChecked || Date.now() - lastChecked > RECHECK_MS;
+      // Purane installs (activate bug) me expiresAt=null store hua — jab tak remote
+      // se ek baar confirm na ho, har status call par re-check karo taaki expiry
+      // galat "Lifetime" na dikhe. Confirmed null = sach mein lifetime.
+      const expiryUnconfirmed =
+        parsed.expiresAtConfirmed !== true && (parsed.expiresAt === null || parsed.expiresAt === undefined);
+      const due = expiryUnconfirmed || !lastChecked || Date.now() - lastChecked > RECHECK_MS;
       // Locally stored expiry (agar ho) — trial/unconfigured fallback ke liye.
       const localExpired = expiresAt !== null && new Date(expiresAt).getTime() <= Date.now();
 
@@ -87,6 +92,7 @@ export async function GET() {
           if (res.expiresAt !== undefined) {
             expiresAt = res.expiresAt ?? null;
             parsed.expiresAt = res.expiresAt ?? null;
+            parsed.expiresAtConfirmed = true;
           }
           if (res.plan) parsed.plan = res.plan;
           if (res.shopName) parsed.shopName = res.shopName;

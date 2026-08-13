@@ -333,7 +333,7 @@ function SidebarNav({
     <nav className="flex-1 overflow-y-auto py-3 px-2 scrollbar-hide">
       <ul className="space-y-0.5">
         <li>
-          <Link href="/" className={navLinkCls(pathname === "/")} onClick={onNavClick}>
+          <Link href="/dashboard" className={navLinkCls(pathname === "/dashboard")} onClick={onNavClick}>
             <LayoutDashboard size={16} /><span>Dashboard</span>
           </Link>
         </li>
