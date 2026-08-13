@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase";
 import {
-  Phone, Menu, X, Zap, MessageCircle, MapPin, Mail, Clock, LogIn, QrCode,
+  Phone, Menu, X, Zap, MessageCircle, MapPin, Mail, Clock, LogIn, QrCode, LayoutDashboard,
 } from "lucide-react";
 import { SITE, getSiteInfo } from "./site";
 import { QrShareModal } from "./components/qr-share";
@@ -17,14 +18,39 @@ const NAV_LINKS = [
 
 export default function PublicLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router   = useRouter();
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
   const [siteInfo, setSiteInfo] = useState<any>(null);
+  const [loggedIn, setLoggedIn] = useState(false);
 
   useEffect(() => {
     getSiteInfo().then(data => setSiteInfo(data));
+    supabase.auth.getUser()
+      .then(({ data: { user } }) => setLoggedIn(!!user))
+      .catch(() => setLoggedIn(false));
   }, []);
+
+  // First-run auto-redirect: kisi bhi public page par visit karte hi agar profiles
+  // mein koi admin exist NAHI karta (naya client deploy, vars push) to `/setup`
+  // par bhej do — manually URL daalne ki zaroorat nahi. Admin bante hi ye
+  // redirect khud band ho jata hai (needsSetup=false).
+  useEffect(() => {
+    let cancelled = false;
+    if (pathname === "/setup") return; // setup page par khud redirect mat karo
+    (async () => {
+      try {
+        const res = await fetch("/api/setup/status", { cache: "no-store" });
+        const data = await res.json();
+        if (cancelled || !res.ok) return;
+        if (data.needsSetup && !data.loggedIn) router.replace("/setup");
+      } catch {
+        /* network fail — redirect skip (site phir bhi render ho jayegi) */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pathname, router]);
 
   const displayInfo = siteInfo || SITE;
 
@@ -94,11 +120,19 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
               <Phone size={14} className="text-emerald-400" />
               Call Now
             </a>
-            <Link href="/login"
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-[13px] font-bold shadow-lg shadow-blue-600/25 transition-all active:scale-95">
-              <LogIn size={14} />
-              Login
-            </Link>
+            {loggedIn ? (
+              <Link href="/dashboard"
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-[13px] font-bold shadow-lg shadow-emerald-600/25 transition-all active:scale-95">
+                <LayoutDashboard size={14} />
+                Dashboard
+              </Link>
+            ) : (
+              <Link href="/login"
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-[13px] font-bold shadow-lg shadow-blue-600/25 transition-all active:scale-95">
+                <LogIn size={14} />
+                Login
+              </Link>
+            )}
           </div>
 
           {/* Mobile actions */}
@@ -150,10 +184,17 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
                 <MessageCircle size={16} /> WhatsApp
               </a>
             </div>
-            <Link href="/login"
-              className="mt-1 flex items-center justify-center gap-2 px-4 py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 text-white text-sm font-bold shadow-lg shadow-blue-600/25 active:scale-95 transition-transform">
-              <LogIn size={16} /> Staff / Client Login
-            </Link>
+            {loggedIn ? (
+              <Link href="/dashboard"
+                className="mt-1 flex items-center justify-center gap-2 px-4 py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-sm font-bold shadow-lg shadow-emerald-600/25 active:scale-95 transition-transform">
+                <LayoutDashboard size={16} /> Dashboard
+              </Link>
+            ) : (
+              <Link href="/login"
+                className="mt-1 flex items-center justify-center gap-2 px-4 py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 text-white text-sm font-bold shadow-lg shadow-blue-600/25 active:scale-95 transition-transform">
+                <LogIn size={16} /> Staff / Client Login
+              </Link>
+            )}
           </nav>
         </div>
       )}
@@ -228,9 +269,15 @@ export default function PublicLayout({ children }: { children: React.ReactNode }
               <button onClick={() => setQrOpen(true)} className="flex items-center gap-1.5 text-[12px] font-bold text-slate-500 hover:text-cyan-400 transition-colors">
                 <QrCode size={13} /> Scan / Share
               </button>
-              <Link href="/login" className="text-[12px] font-bold text-slate-500 hover:text-blue-400 transition-colors">
-                Staff Login →
-              </Link>
+              {loggedIn ? (
+                <Link href="/dashboard" className="flex items-center gap-1.5 text-[12px] font-bold text-slate-500 hover:text-emerald-400 transition-colors">
+                  <LayoutDashboard size={13} /> Dashboard →
+                </Link>
+              ) : (
+                <Link href="/login" className="text-[12px] font-bold text-slate-500 hover:text-blue-400 transition-colors">
+                  Staff Login →
+                </Link>
+              )}
             </div>
           </div>
         </div>

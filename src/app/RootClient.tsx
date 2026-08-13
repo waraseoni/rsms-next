@@ -475,6 +475,12 @@ export default function RootClient({ children }: { children: React.ReactNode }) 
   const [theme,        setTheme]        = useState<"dark" | "light" | null>(null);
   const [license,      setLicense]      = useState<LicenseStatus | null>(null);
 
+  // Public pages — no sidebar, no dashboard chrome. Logged-in user bhi public
+  // website dekh sakta hai (sidebar brand par click kar ke) — sirf /login aur
+  // /setup logged-in user ke liye /dashboard par redirect hote hain.
+  const PUBLIC_PAGES = ["/login", "/setup", "/about", "/contact", "/job-status", "/stage-lighting", "/industrial", "/power-supply"];
+  const isPublicPage = PUBLIC_PAGES.includes(pathname) || pathname === "/";
+
   // License status fetch — login ke baad har non-public page par.
   // Gate (LicenseGate) isi state ko dekh kar render hota hai.
   const refreshLicense = useCallback(async () => {
@@ -500,9 +506,8 @@ export default function RootClient({ children }: { children: React.ReactNode }) 
     let cancelled = false;
     (async () => {
       try {
-        // Public routes — redirect mat karo
-        const PUBLIC_PAGES = ["/", "/about", "/contact", "/job-status", "/login", "/setup", "/stage-lighting", "/industrial", "/power-supply"];
-        const isPublicPage = PUBLIC_PAGES.some(p => pathname === p || pathname.startsWith(p + "/"));
+        // Public routes — redirect mat karo (shared PUBLIC_PAGES const se)
+        const isPublicPage = PUBLIC_PAGES.includes(pathname) || pathname === "/";
 
         // BUG FIX: getUser() kabhi-kabhi network par hang ho jata hai → "V-TECH
         // Secure Boot" loader hamesha ke liye atak jata tha. 6s timeout: public
@@ -605,12 +610,12 @@ export default function RootClient({ children }: { children: React.ReactNode }) 
     return () => window.removeEventListener("error", onErr, true);
   }, []);
 
-  // Client role → sirf /my-account/* access. Baaki pages par redirect.
+  // Client role → sirf /my-account/* access (public website ke alawa).
   useEffect(() => {
-    if (profile?.role === "client" && !pathname.startsWith("/my-account")) {
+    if (profile?.role === "client" && !pathname.startsWith("/my-account") && !isPublicPage) {
       router.replace("/my-account");
     }
-  }, [profile?.role, pathname, router]);
+  }, [profile?.role, pathname, isPublicPage, router]);
 
   // LICENSE GATE: profile milne ke baad non-public page par license status fetch.
   // Login hamesha allowed hai — isliye har baar profile set hone par chalta hai.
@@ -743,20 +748,15 @@ export default function RootClient({ children }: { children: React.ReactNode }) 
   // Auto-close drawer on route change
   useEffect(() => { setDrawerOpen(false); }, [pathname]);
 
-  // Public pages — no sidebar, no dashboard chrome
-  const PUBLIC_PAGES = ["/login", "/setup", "/about", "/contact", "/job-status", "/stage-lighting", "/industrial", "/power-supply"];
-  const isPublicPage = PUBLIC_PAGES.includes(pathname) || pathname === "/";
-
-  // Logged-in user on a public page → dashboard (public site logged-in users ke liye nahi)
+  // Logged-in user /login ya /setup par → dashboard. Baaki public pages (public
+  // website) logged-in user bhi dekh sakta hai — koi redirect nahi.
   useEffect(() => {
-    if (profile && isPublicPage) router.replace("/dashboard");
+    if (profile && (pathname === "/login" || pathname === "/setup")) router.replace("/dashboard");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile, pathname]);
 
   if (isPublicPage) {
-    if (!profile) return <>{children}</>;
-    // Logged in — redirect effect `/dashboard` par bhejega; flash avoid karo
-    return <div className="min-h-screen bg-[#0d1117]" />;
+    return <>{children}</>;
   }
 
   if (loading) {
@@ -804,10 +804,11 @@ export default function RootClient({ children }: { children: React.ReactNode }) 
       {/* ══════════════════════ DESKTOP SIDEBAR ══════════════════════ */}
         {isMobile === false && !isAiPage && (
           <aside className="fixed top-0 left-0 h-full w-[260px] theme-sidebar border-r border-[#21293d] flex flex-col z-50 theme-sidebar">
-            {/* Brand */}
+            {/* Brand — click → public website (login rahne par bhi) */}
             <div className="relative overflow-hidden px-5 py-4 border-b border-[#1a2234]">
               <div className="absolute inset-0 bg-gradient-to-br from-blue-700/15 to-transparent pointer-events-none" />
-              <div className="relative flex items-center gap-3">
+              <Link href="/" onClick={() => setDrawerOpen(false)} title="Public website kholen"
+                className="relative flex items-center gap-3 hover:opacity-80 transition-opacity">
                 <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/50 flex-shrink-0">
                   <Sparkles size={20} className="text-white" />
                 </div>
@@ -818,7 +819,7 @@ export default function RootClient({ children }: { children: React.ReactNode }) 
 </div>
                   <div className="text-[8px] text-slate-500 dark:text-slate-300 font-black uppercase tracking-widest mt-0.5">Management System</div>
                 </div>
-              </div>
+              </Link>
             </div>
 
             <SidebarNav pathname={pathname} isAdmin={isAdmin} isClient={isClient} sellerEnabled={license?.sellerEnabled} devEnabled={license?.devEnabled} />
@@ -850,15 +851,18 @@ export default function RootClient({ children }: { children: React.ReactNode }) 
               <div className="relative overflow-hidden px-4 py-4 border-b border-[#1a2234] flex items-center justify-between">
                 <div className="absolute inset-0 bg-gradient-to-br from-blue-700/15 to-transparent pointer-events-none" />
                 <div className="relative flex items-center gap-3">
-                  <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/50">
-                    <Sparkles size={18} className="text-white" />
-                  </div>
-                  <div>
-                    <div className="text-base font-black tracking-tight text-white leading-none">
-                      V-TECH <span className="text-blue-400 font-light">PRO</span>
+                  <Link href="/" onClick={() => setDrawerOpen(false)} title="Public website kholen"
+                    className="flex items-center gap-3 hover:opacity-80 transition-opacity">
+                    <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-blue-700 rounded-xl flex items-center justify-center shadow-lg shadow-blue-900/50">
+                      <Sparkles size={18} className="text-white" />
                     </div>
-                    <div className="text-[8px] text-slate-600 font-black uppercase tracking-widest mt-0.5">Management System</div>
-                  </div>
+                    <div>
+                      <div className="text-base font-black tracking-tight text-white leading-none">
+                        V-TECH <span className="text-blue-400 font-light">PRO</span>
+                      </div>
+                      <div className="text-[8px] text-slate-600 font-black uppercase tracking-widest mt-0.5">Management System</div>
+                    </div>
+                  </Link>
                 </div>
                 <button
                   onClick={() => setDrawerOpen(false)}
