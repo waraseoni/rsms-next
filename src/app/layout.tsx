@@ -1,10 +1,45 @@
 import "./globals.css";
 import Script from "next/script";
 import RootClient from "./RootClient";
-import { Outfit, Inter } from "next/font/google";
+import type { Metadata, Viewport } from "next";
 
-const outfit = Outfit({ subsets: ["latin"], variable: "--font-outfit", display: "swap" });
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
+const SITE_NAME = process.env.NEXT_PUBLIC_SITE_NAME || "V-Technologies";
+const SITE_TAGLINE = process.env.NEXT_PUBLIC_SITE_TAGLINE || "Repair & Service Management System";
+
+export const metadata: Metadata = {
+  title: {
+    default: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    template: `%s | ${SITE_NAME}`,
+  },
+  description: `${SITE_NAME} repair shop management system. Track jobs, manage clients, inventory, and payments — all in one place.`,
+  applicationName: SITE_NAME,
+  authors: [{ name: SITE_NAME }],
+  openGraph: {
+    type: "website",
+    locale: "en_IN",
+    siteName: SITE_NAME,
+    title: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    description: `Repair shop management system by ${SITE_NAME}. Track jobs, manage clients, and streamline your service business.`,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: `${SITE_NAME} — ${SITE_TAGLINE}`,
+    description: `Repair shop management system by ${SITE_NAME}.`,
+  },
+  robots: {
+    index: false,
+    follow: false,
+    googleBot: { index: false, follow: false },
+  },
+  manifest: "/manifest.json",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  maximumScale: 1,
+  themeColor: "#0a0e17",
+};
 
 // ─── Boot Guard (pre-hydration) ──────────────────────────────────────────────
 // Firefox me stale HTML → missing chunks → scripts fail → React KABHI hydrate
@@ -36,11 +71,55 @@ const BOOT_GUARD = `(function(){
   window.setTimeout(function(){if(!window.__VTECH_BOOTED__)go();},8000);
 })();`;
 
+// ─── Theme Boot (pre-paint) ──────────────────────────────────────────────────
+// Default theme DARK hai. Fresh browser me localStorage khaali hota hai —
+// data-theme attribute set na ho to CSS vars (:root = LIGHT palette) light
+// render karte hain jabki dark:* classes aur body DARK rehte hain → "kuch
+// light kuch dark" mix dikhtha tha. Ye inline script HTML parse hote hi
+// (first paint se PEHLE) sahi attribute laga deti hai: saved vtech_theme
+// ("light" | "dark" | "system"), warna default 'dark'. Server layout me hi
+// hai — BOOT_GUARD wala reason (client render par <script> hydration error).
+const THEME_BOOT = `(function(){
+  var t="dark";
+  try{
+    var s=localStorage.getItem("vtech_theme");
+    if(s==="light")t="light";
+    else if(s==="system"){t=(window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light";}
+  }catch(e){}
+  document.documentElement.setAttribute("data-theme",t);
+})();`;
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="h-full">
-      <body className={`h-full m-0 font-sans antialiased text-slate-200 bg-[#0d1117] overflow-x-hidden theme-dark ${outfit.variable} ${inter.variable}`}>
-        <Script id="vtech-boot-guard" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: BOOT_GUARD }} />
+    // data-theme="dark" = server-rendered default (script bhi same rakhta hai);
+    // suppressHydrationWarning: saved-light users ke case me script attribute
+    // hydration se pehle badal deta hai — mismatch warning expected hai.
+    <html lang="en" className="h-full" data-theme="dark" suppressHydrationWarning>
+      {/* Body colors hardcoded NAHI — globals.css ka body{background:var(--background)}
+          rule attribute ke hisaab se turant sahi color deta hai (pehle yahan
+          bg-[#0d1117] text-slate-200 hardcoded tha jo light theme se ladta tha). */}
+      <body
+        className={`h-full m-0 font-sans antialiased overflow-x-hidden`}
+      >
+        {/* Supabase (auth + realtime + REST) ka TCP/TLS connection pehle se
+            warm — boot ke pehle network round-trip ka latency kam hota hai.
+            React 19 in <link> tags ko hoist kar ke <head> me chala deta hai. */}
+        <link
+          rel="preconnect"
+          href={process.env.NEXT_PUBLIC_SUPABASE_URL!}
+          crossOrigin="anonymous"
+        />
+        <link rel="dns-prefetch" href={process.env.NEXT_PUBLIC_SUPABASE_URL!} />
+        <Script
+          id="vtech-theme-boot"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: THEME_BOOT }}
+        />
+        <Script
+          id="vtech-boot-guard"
+          strategy="beforeInteractive"
+          dangerouslySetInnerHTML={{ __html: BOOT_GUARD }}
+        />
         <RootClient>{children}</RootClient>
       </body>
     </html>

@@ -9,8 +9,12 @@ export async function getServerSupabase() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() { return cookieStore.getAll(); },
-        setAll(cookiesToSet) { cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options)); },
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options));
+        },
       },
     }
   );
@@ -25,7 +29,9 @@ export const FORBIDDEN = () =>
 export async function requireUser() {
   const supabase = await getServerSupabase();
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
     if (!user) return null;
     return user;
   } catch {
@@ -34,17 +40,29 @@ export async function requireUser() {
 }
 
 export async function requireStaff() {
+  const session = await requireStaffWithRole();
+  return session?.user ?? null;
+}
+
+/** Single round-trip auth + role — use on server pages that also need role. */
+export async function requireStaffWithRole(): Promise<{
+  user: NonNullable<Awaited<ReturnType<typeof requireUser>>>;
+  role: string;
+} | null> {
   const supabase = await getServerSupabase();
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
     if (!user) return null;
     const { data: profile } = await supabase
       .from("profiles")
       .select("role")
       .eq("id", user.id)
       .maybeSingle();
-    if (profile?.role !== "admin" && profile?.role !== "staff" && profile?.role !== "developer") return null;
-    return user;
+    const role = profile?.role ?? "staff";
+    if (role !== "admin" && role !== "staff" && role !== "developer") return null;
+    return { user, role };
   } catch {
     return null;
   }
@@ -53,7 +71,9 @@ export async function requireStaff() {
 export async function requireClient() {
   const supabase = await getServerSupabase();
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
     if (!user) return null;
     const { data: profile } = await supabase
       .from("profiles")
@@ -85,7 +105,11 @@ export async function requireAdmin() {
     return null;
   }
   if (!user) return null;
-  const { data: profile } = await supabase.from("profiles").select("role").eq("id", user.id).maybeSingle();
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
   // Developer role admin ke barabar trusted hota hai (V-TECH dev team ke liye).
   if (profile?.role !== "admin" && profile?.role !== "developer") return null;
   return { user, profile };
@@ -100,7 +124,9 @@ export async function requireAdminOrDeveloper() {
 export async function getSessionRole(): Promise<string | null> {
   const supabase = await getServerSupabase();
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
     if (!user) return null;
     const { data: profile } = await supabase
       .from("profiles")

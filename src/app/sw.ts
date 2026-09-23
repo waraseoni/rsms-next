@@ -34,17 +34,20 @@ const CUSTOM_CACHE: RuntimeCaching[] = [
   {
     matcher: ({ request }) => request.mode === "navigate",
     handler: async ({ request }) => {
+      // RSC soft-nav requests (carry _rsc= param + RSC:1 header) — let
+      // NetworkOnly handler below take care of them. Passing { cache } options
+      // alongside a Request object causes "Error in input stream" on Firefox.
+      if (request.headers.get("RSC") === "1") return fetch(request);
       try {
-        const res = await fetch(request, { cache: "no-store" });
+        const res = await fetch(new Request(request, { cache: "no-store" }));
         if (res && (res.ok || res.status === 304)) return res;
       } catch {
         const url = new URL(request.url);
         const fallback =
-          (await serwist.matchPrecache(url.pathname)) ||
-          (await serwist.matchPrecache("/"));
+          (await serwist.matchPrecache(url.pathname)) || (await serwist.matchPrecache("/"));
         if (fallback) return fallback;
       }
-      return fetch(request, { cache: "no-store" });
+      return fetch(new Request(request, { cache: "no-store" }));
     },
   },
   // ⛔ RSC / Flight payloads (soft-navigation data) — kabhi cache nahi.
@@ -59,7 +62,9 @@ const CUSTOM_CACHE: RuntimeCaching[] = [
     matcher: /\/_next\/static.+\.js$/i,
     handler: new CacheFirst({
       cacheName: "next-static-js-assets",
-      plugins: [new ExpirationPlugin({ maxEntries: 64, maxAgeSeconds: 1440 * 60, maxAgeFrom: "last-used" })],
+      plugins: [
+        new ExpirationPlugin({ maxEntries: 64, maxAgeSeconds: 1440 * 60, maxAgeFrom: "last-used" }),
+      ],
     }),
   },
   // ✅ Images — hashed URLs, StaleWhileRevalidate safe
@@ -67,7 +72,13 @@ const CUSTOM_CACHE: RuntimeCaching[] = [
     matcher: /\.(?:jpg|jpeg|gif|png|svg|ico|webp)$/i,
     handler: new StaleWhileRevalidate({
       cacheName: "static-image-assets",
-      plugins: [new ExpirationPlugin({ maxEntries: 64, maxAgeSeconds: 720 * 60 * 60, maxAgeFrom: "last-used" })],
+      plugins: [
+        new ExpirationPlugin({
+          maxEntries: 64,
+          maxAgeSeconds: 720 * 60 * 60,
+          maxAgeFrom: "last-used",
+        }),
+      ],
     }),
   },
   // ✅ Fonts — hashed URLs, safe
@@ -75,7 +86,9 @@ const CUSTOM_CACHE: RuntimeCaching[] = [
     matcher: /\.(?:eot|otf|ttc|ttf|woff|woff2|font.css)$/i,
     handler: new StaleWhileRevalidate({
       cacheName: "static-font-assets",
-      plugins: [new ExpirationPlugin({ maxEntries: 4, maxAgeSeconds: 10080 * 60, maxAgeFrom: "last-used" })],
+      plugins: [
+        new ExpirationPlugin({ maxEntries: 4, maxAgeSeconds: 10080 * 60, maxAgeFrom: "last-used" }),
+      ],
     }),
   },
   // ✅ CSS — hashed URLs, safe
@@ -83,7 +96,9 @@ const CUSTOM_CACHE: RuntimeCaching[] = [
     matcher: /\.(?:css|less)$/i,
     handler: new StaleWhileRevalidate({
       cacheName: "static-style-assets",
-      plugins: [new ExpirationPlugin({ maxEntries: 32, maxAgeSeconds: 1440 * 60, maxAgeFrom: "last-used" })],
+      plugins: [
+        new ExpirationPlugin({ maxEntries: 32, maxAgeSeconds: 1440 * 60, maxAgeFrom: "last-used" }),
+      ],
     }),
   },
   // ⛔ API routes — dynamic/auth data, kabhi cache nahi
@@ -121,11 +136,12 @@ const serwist = new Serwist({
 if (self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1") {
   self.addEventListener("install", () => {
     self.skipWaiting();
-    self.registration
-      .unregister()
-      .catch(() => {});
+    self.registration.unregister().catch(() => {});
     if (self.caches) {
-      self.caches.keys().then((keys) => Promise.all(keys.map((k) => self.caches.delete(k).catch(() => {})))).catch(() => {});
+      self.caches
+        .keys()
+        .then((keys) => Promise.all(keys.map((k) => self.caches.delete(k).catch(() => {}))))
+        .catch(() => {});
     }
   });
 } else {
@@ -135,11 +151,77 @@ if (self.location.hostname === "localhost" || self.location.hostname === "127.0.
   self.addEventListener("activate", (event) => {
     event.waitUntil(
       (async () => {
-        const stale = ["pages", "pages-rsc-prefetch", "pages-rsc", "next-data", "apis", "others", "cross-origin"];
+        const stale = [
+          "pages",
+          "pages-rsc-prefetch",
+          "pages-rsc",
+          "next-data",
+          "apis",
+          "others",
+          "cross-origin",
+        ];
         await Promise.all(stale.map((name) => caches.delete(name)));
       })()
     );
   });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUSH NOTIFICATION HANDLER (100% Free — VAPID)
+// ─────────────────────────────────────────────────────────────────────────────
+// Jab server se push aaye → browser ko notification dikhao.
+// Payload format: { title, body, icon, badge, tag, url, data }
+self.addEventListener("push", (event) => {
+  if (!event.data) return;
+
+  let payload: {
+    title: string;
+    body: string;
+    icon?: string;
+    badge?: string;
+    tag?: string;
+    url?: string;
+    data?: Record<string, unknown>;
+  };
+  try {
+    payload = event.data.json();
+  } catch {
+    payload = { title: "V-Tech", body: event.data.text() };
+  }
+
+  const opts: Record<string, unknown> = {
+    body: payload.body,
+    icon: payload.icon || "/icons/icon-192x192.png",
+    badge: payload.badge || "/icons/icon-192x192.png",
+    tag: payload.tag || "vtech-notification",
+    data: { url: payload.url || "/dashboard", ...payload.data },
+    vibrate: [100, 50, 100],
+  };
+
+  event.waitUntil(self.registration.showNotification(payload.title, opts as NotificationOptions));
+});
+
+// Notification click → URL par navigate karo
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = event.notification.data?.url || "/dashboard";
+
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      // Agar already open hai to focus karo
+      for (const client of clients) {
+        if ("focus" in client) {
+          client.focus();
+          if ("navigate" in client) {
+            (client as WindowClient).navigate(url);
+          }
+          return;
+        }
+      }
+      // Naya window open karo
+      self.clients.openWindow(url);
+    })
+  );
+});
 
 serwist.addEventListeners();

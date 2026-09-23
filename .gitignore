@@ -22,11 +22,11 @@ dist/
 # 3. Secret Environment Variables (CRITICAL - kabhi push mat karna!)
 .env
 .env.local
+.env.local.vtech
 .env.*.local
 .env.production
 .env*.7z
 .env*_*
-.env.local.*
 !.env.example
 
 # 3b. Applied (already-run) Supabase migrations — archived, not re-applied
@@ -43,6 +43,10 @@ vikram_db_supabase.txt
 # 5b. Service worker build artifacts (Serwist)
 public/sw*
 public/swe-worker*
+
+# 5b. Commission-rule scratch helpers + PII DB-rollback snapshots (NEVER push)
+*.cjs
+backup_comm_hist_*.json
 
 # 6. Logs & Debugging
 npm-debug.log*
@@ -88,6 +92,7 @@ temp-php-repo/
 
 # 12. Android / Capacitor Build Output
 android/
+*.apk
 
 # 13. Large Auto-Generated Files
 structure.txt
@@ -103,15 +108,17 @@ src/app/salary/*page - Copy.tsx*
 vtech_backup_*.json
 sync_plan.md
 backups/
+.freebuff/
 
 # 17. Misc sensitive txt files
 *.7z
 db folder/
-env_store/
 
 # 18. Client packages & per-client secrets (generate karo, kabhi push mat karo)
 packages/
 scripts/clients.json
+# 19. Kapil's env backup + legacy MariaDB dump (do not commit)
+.env.local.kapil
+.env.local.namdev
+mariadb dump/
 
-# 19. Freebuff / AI tooling local state (kabhi push mat karo)
-.freebuff/

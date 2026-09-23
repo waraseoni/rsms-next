@@ -1,5 +1,6 @@
-import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { getAdminSupabase } from "@/lib/admin-supabase";
+import { NextResponse, type NextRequest } from "next/server";
+
 import { requireUser } from "@/lib/api-auth";
 import {
   isLicenseConfigured,
@@ -8,11 +9,7 @@ import {
   type LicenseStatus,
 } from "@/lib/license";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
+const supabaseAdmin = getAdminSupabase();
 
 // Re-check interval: default 24h. LICENSE_RECHECK_HOURS env se shorten kiya ja
 // sakta hai (seller ko delete/revoke ka asar jaldi dikhane ke liye).
@@ -39,7 +36,7 @@ async function upsertField(field: string, value: string) {
   return supabaseAdmin.from("system_info").insert({ meta_field: field, meta_value: value });
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     // requireUser (admin nahi): login hamesha allowed hai, isliye staff/client ko
     // bhi status dikhega — taaki unke liye bhi license gate sahi dikhe.
@@ -47,6 +44,11 @@ export async function GET() {
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    // ?force=true → login/hard-refresh par cache bypass karke central se
+    // fresh verify karo — seller ke changes (plan, expiry, revoke) jaldi
+    // client tak pahunchen.
+    const force = req.nextUrl.searchParams.get("force") === "true";
 
     const [keyRaw, statusRaw, lastCheckedRaw] = await Promise.all([
       readField("license_key"),
@@ -56,67 +58,115 @@ export async function GET() {
 
     let parsed: Partial<LicenseStatus> = {};
     if (statusRaw) {
-      try { parsed = JSON.parse(statusRaw); } catch { /* ignore */ }
+      try {
+        parsed = JSON.parse(statusRaw);
+      } catch {
+        /* ignore */
+      }
     }
 
     const activationId = parsed.activationId;
     const activated = !!parsed.activated && !!keyRaw;
     let valid = false;
     let error: string | undefined;
-    const plan = parsed.plan;
-    const shopName = parsed.shopName;
+    let plan = parsed.plan;
+    let shopName = parsed.shopName;
     let expiresAt = parsed.expiresAt ?? null;
 
     if (activated && activationId) {
-      const lastChecked = lastCheckedRaw ? new Date(lastCheckedRaw).getTime() : 0;
-      // Purane installs (activate bug) me expiresAt=null store hua — jab tak remote
-      // se ek baar confirm na ho, har status call par re-check karo taaki expiry
-      // galat "Lifetime" na dikhe. Confirmed null = sach mein lifetime.
-      const expiryUnconfirmed =
-        parsed.expiresAtConfirmed !== true && (parsed.expiresAt === null || parsed.expiresAt === undefined);
-      const due = expiryUnconfirmed || !lastChecked || Date.now() - lastChecked > RECHECK_MS;
-      // Locally stored expiry (agar ho) — trial/unconfigured fallback ke liye.
+      // Locally stored expiry (agar ho) — re-check trigger aur fallback ke liye.
       const localExpired = expiresAt !== null && new Date(expiresAt).getTime() <= Date.now();
+      const lastChecked = lastCheckedRaw ? new Date(lastCheckedRaw).getTime() : 0;
+
+      // Jab local expiry stored nahi hai (null / lifetime), chhota interval
+      // use karo (6h). Reason: central se real expiry date fetch karna
+      // zaroori hai — bina expiry ke local fallback kaam nahi karta, to stale
+      // "lifetime" result ghanton tak galat access de sakta hai.
+      const NULL_EXPIRY_RECHECK_MS = 6 * 60 * 60 * 1000;
+      const effectiveInterval = expiresAt === null ? NULL_EXPIRY_RECHECK_MS : RECHECK_MS;
+      const due =
+        force || !lastChecked || Date.now() - lastChecked > effectiveInterval || localExpired;
 
       if (isLicenseConfigured() && due) {
-        // Central se fresh verify — naya activation NAHI, sirf check_license.
+        // Central transport errors (cold-start/network/RPC hiccup) kabhi license
+        // ko invalid NAHI banate — sirf central ka sacha business verdict
+        // (NOT_ACTIVATED / LICENSE_DISABLED / LICENSE_EXPIRED / ...) downgrade
+        // kar sakta hai. Warna deployment ke baad cold function par central RPC
+        // ka transient timeout/LICENSE_SERVICE_ERROR remoteValid=false persist
+        // kar deta tha → Refresh tak gate dikhta tha.
+        const BUSINESS_DOWNGRADE = [
+          "NOT_ACTIVATED",
+          "LICENSE_NOT_FOUND",
+          "LICENSE_DISABLED",
+          "LICENSE_EXPIRED",
+          "INVALID_KEY",
+          "MAX_ACTIVATIONS",
+        ];
         try {
           const res = await checkRemoteLicense(activationId);
           const checkedAt = new Date().toISOString();
-          // Real RPC response mila (network error nahi) → result ko persist karo,
-          // taaki agle 24h ke status calls bhi yahi result maane — deleted/expired
-          // license ka gate reload par galat nahi hat sakta.
-          parsed.remoteValid = res.ok;
-          parsed.remoteError = res.error;
-          parsed.remoteCheckedAt = checkedAt;
-          if (res.expiresAt !== undefined) {
-            expiresAt = res.expiresAt ?? null;
-            parsed.expiresAt = res.expiresAt ?? null;
-            parsed.expiresAtConfirmed = true;
+
+          if (res.ok) {
+            parsed.remoteValid = true;
+            parsed.remoteError = undefined;
+            parsed.remoteCheckedAt = checkedAt;
+            if (res.plan) {
+              parsed.plan = res.plan;
+              plan = res.plan;
+            }
+            if (res.shopName) {
+              parsed.shopName = res.shopName;
+              shopName = res.shopName;
+            }
+            if (res.expiresAt !== undefined) {
+              expiresAt = res.expiresAt ?? null;
+              parsed.expiresAt = res.expiresAt ?? null;
+            }
+            if (res.enabledModules !== undefined) {
+              parsed.enabledModules = res.enabledModules;
+            }
+            valid = true;
+            error = undefined;
+
+            await Promise.all([
+              upsertField("license_last_checked", checkedAt),
+              upsertField("license_status", JSON.stringify(parsed)),
+            ]);
+          } else if (
+            res.error &&
+            BUSINESS_DOWNGRADE.some((tag) => res.error?.includes(tag))
+          ) {
+            // Asli central rejection → persist karo + block.
+            parsed.remoteValid = false;
+            parsed.remoteError = res.error;
+            parsed.remoteCheckedAt = checkedAt;
+            if (res.expiresAt !== undefined) {
+              parsed.expiresAt = res.expiresAt ?? null;
+            }
+            valid = false;
+            error = res.error;
+
+            await Promise.all([
+              upsertField("license_last_checked", checkedAt),
+              upsertField("license_status", JSON.stringify(parsed)),
+            ]);
+          } else {
+            // Transport/RPC hiccup — verdict unreliable hai. Last-known-good par
+            // chalo, cache DOWNGRADE NAHI karte aur last_checked bump nahi →
+            // agli call turant dobara central se verify karegi.
+            error = res.error;
+            valid = localExpired ? false : parsed.remoteValid !== false;
           }
-          if (res.plan) parsed.plan = res.plan;
-          if (res.shopName) parsed.shopName = res.shopName;
-          valid = res.ok;
-          error = res.ok ? undefined : res.error;
-          // Re-check timestamp hamesha save karo — offline grace window avoid karo.
-          await Promise.all([
-            upsertField("license_last_checked", checkedAt),
-            upsertField("license_status", JSON.stringify(parsed)),
-          ]);
         } catch {
-          // Central unreachable → offline grace: last verified result ko bharosha.
-          // Agar central ne kabhi revoke/delete bataya tha to wahi maano.
           valid = !localExpired && parsed.remoteValid !== false;
           error = "LICENSE_CHECK_UNREACHABLE";
         }
       } else if (!isLicenseConfigured()) {
-        // Service setup nahi → locally stored expiry se verify karo.
         valid = !localExpired;
       } else {
-        // Re-check abhi due nahi → last verified remote result ko maano. Agar
-        // kabhi remote check nahi hua (undefined) to local expiry se verify.
         valid = parsed.remoteValid !== undefined ? parsed.remoteValid : !localExpired;
-        error = parsed.remoteError ?? (parsed.remoteValid === false ? "LICENSE_NOT_ACTIVE" : undefined);
+        error =
+          parsed.remoteError ?? (parsed.remoteValid === false ? "LICENSE_NOT_ACTIVE" : undefined);
       }
     } else if (activated) {
       // Purani install jisme activationId store nahi hua — local expiry se verify.
@@ -134,13 +184,12 @@ export async function GET() {
       expiresAt,
       activationId,
       error,
+      enabledModules: parsed.enabledModules ?? null,
       // Env vars set hain to portals enabled (sirf seller ke deployment par).
       sellerEnabled:
-        !!process.env.LICENSE_SERVICE_SERVICE_ROLE_KEY &&
-        !!process.env.SELLER_PORTAL_PASSWORD,
+        !!process.env.LICENSE_SERVICE_SERVICE_ROLE_KEY && !!process.env.SELLER_PORTAL_PASSWORD,
       devEnabled:
-        !!process.env.LICENSE_SERVICE_SERVICE_ROLE_KEY &&
-        !!process.env.DEV_PORTAL_PASSWORD,
+        !!process.env.LICENSE_SERVICE_SERVICE_ROLE_KEY && !!process.env.DEV_PORTAL_PASSWORD,
     };
 
     return NextResponse.json(status);

@@ -10,8 +10,7 @@ export const LICENSE_CONFIG = {
   anonKey: process.env.LICENSE_SERVICE_ANON_KEY || "",
 };
 
-export const isLicenseConfigured = () =>
-  !!LICENSE_CONFIG.url && !!LICENSE_CONFIG.anonKey;
+export const isLicenseConfigured = () => !!LICENSE_CONFIG.url && !!LICENSE_CONFIG.anonKey;
 
 export function makeLicenseClient() {
   return createClient(LICENSE_CONFIG.url, LICENSE_CONFIG.anonKey, {
@@ -21,10 +20,7 @@ export function makeLicenseClient() {
 
 // Har shop ke app instance ka stable unique id — host (domain/LAN IP) ka sha256.
 export function makeActivationId(host: string) {
-  return createHash("sha256")
-    .update(host.trim().toLowerCase())
-    .digest("hex")
-    .slice(0, 32);
+  return createHash("sha256").update(host.trim().toLowerCase()).digest("hex").slice(0, 32);
 }
 
 export const LICENSE_KEY_RE = /^VTC-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/i;
@@ -55,11 +51,11 @@ export type LicenseStatus = {
   remoteValid?: boolean;
   remoteError?: string;
   remoteCheckedAt?: string;
-  /** Remote se expiresAt ek baar confirm ho chuki hai (null = lifetime confirm). */
-  expiresAtConfirmed?: boolean;
   /** Seller/Developer portals is deployment par enabled hain ya nahi (env se). */
   sellerEnabled?: boolean;
   devEnabled?: boolean;
+  /** Seller ne client ke liye kaunse modules enable kiye hain. null = sab enabled. */
+  enabledModules?: string[] | null;
 };
 
 /** Central RPC call — validate key + register/refresh this instance. */
@@ -68,7 +64,15 @@ export async function activateRemoteLicense(opts: {
   activationId: string;
   shopUrl: string;
   shopName: string;
-}): Promise<{ ok: boolean; error?: string; plan?: string; shopName?: string; expiresAt?: string | null; alreadyActivated?: boolean }> {
+}): Promise<{
+  ok: boolean;
+  error?: string;
+  plan?: string;
+  shopName?: string;
+  expiresAt?: string | null;
+  alreadyActivated?: boolean;
+  enabledModules?: string[] | null;
+}> {
   if (!isLicenseConfigured()) {
     return { ok: false, error: "LICENSE_SERVICE_NOT_CONFIGURED" };
   }
@@ -82,7 +86,17 @@ export async function activateRemoteLicense(opts: {
   if (error) {
     return { ok: false, error: `LICENSE_SERVICE_ERROR: ${error.message}` };
   }
-  return normalizeLicenseResponse(data, true);
+  const raw = (data ?? { ok: false, error: "EMPTY_RESPONSE" }) as Record<string, unknown>;
+  return {
+    ok: !!raw.ok,
+    error: typeof raw.error === "string" ? raw.error : undefined,
+    plan: typeof raw.plan === "string" ? raw.plan : undefined,
+    shopName: typeof raw.shop_name === "string" ? raw.shop_name : undefined,
+    expiresAt: "expires_at" in raw ? (raw.expires_at as string | null) : undefined,
+    alreadyActivated:
+      typeof raw.already_activated === "boolean" ? raw.already_activated : undefined,
+    enabledModules: Array.isArray(raw.enabled_modules) ? (raw.enabled_modules as string[]) : null,
+  };
 }
 
 /**
@@ -95,6 +109,7 @@ export async function checkRemoteLicense(activationId: string): Promise<{
   plan?: string;
   shopName?: string;
   expiresAt?: string | null;
+  enabledModules?: string[] | null;
 }> {
   if (!isLicenseConfigured()) {
     return { ok: false, error: "LICENSE_SERVICE_NOT_CONFIGURED" };
@@ -106,38 +121,13 @@ export async function checkRemoteLicense(activationId: string): Promise<{
   if (error) {
     return { ok: false, error: `LICENSE_SERVICE_ERROR: ${error.message}` };
   }
-  return normalizeLicenseResponse(data, false);
-}
-
-// RPC json_build_object camelCase nahi bhejta — 'expires_at'/'shop_name'
-// (snake_case) aati hai. Dono naming handle karo taaki purana/new dono chale.
-function normalizeLicenseResponse(data: unknown, withAlreadyActivated: boolean): {
-  ok: boolean;
-  error?: string;
-  plan?: string;
-  shopName?: string;
-  expiresAt?: string | null;
-  alreadyActivated?: boolean;
-} {
-  const d = (data ?? { ok: false, error: "EMPTY_RESPONSE" }) as Record<string, unknown>;
-  const shopName =
-    (typeof d.shop_name === "string" && d.shop_name.trim()) ||
-    (typeof d.shopName === "string" && d.shopName.trim()) ||
-    undefined;
-  // expires_at key hi absent ho (purana RPC) to undefined — taaki status route
-  // usse "confirmed lifetime" samajh ke overwrite na kar de.
-  const hasExpiresAt = d.expires_at !== undefined || d.expiresAt !== undefined;
-  const expiresAtRaw =
-    (typeof d.expires_at === "string" && d.expires_at) ||
-    (typeof d.expiresAt === "string" && d.expiresAt) ||
-    null;
-  const expiresAt = hasExpiresAt ? expiresAtRaw : undefined;
+  const raw = (data ?? { ok: false, error: "EMPTY_RESPONSE" }) as Record<string, unknown>;
   return {
-    ok: d.ok === true,
-    error: typeof d.error === "string" ? d.error : undefined,
-    plan: typeof d.plan === "string" ? d.plan : undefined,
-    shopName,
-    expiresAt,
-    ...(withAlreadyActivated ? { alreadyActivated: d.already_activated === true || d.alreadyActivated === true } : {}),
+    ok: !!raw.ok,
+    error: typeof raw.error === "string" ? raw.error : undefined,
+    plan: typeof raw.plan === "string" ? raw.plan : undefined,
+    shopName: typeof raw.shop_name === "string" ? raw.shop_name : undefined,
+    expiresAt: "expires_at" in raw ? (raw.expires_at as string | null) : undefined,
+    enabledModules: Array.isArray(raw.enabled_modules) ? (raw.enabled_modules as string[]) : null,
   };
 }

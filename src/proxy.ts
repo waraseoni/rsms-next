@@ -1,6 +1,9 @@
 // proxy.ts — Public website + Protected dashboard (Next 16: renamed from middleware.ts)
-import { createServerClient } from '@supabase/ssr'
-import { NextResponse, type NextRequest } from 'next/server'
+import { createServerClient } from "@supabase/ssr";
+import { NextResponse, type NextRequest } from "next/server";
+import { ABSOLUTE_MS } from "@/lib/session-policy";
+import { logger } from "@/lib/logger";
+import { LITE_MODE, isLiteRouteAllowed } from "@/lib/lite";
 
 export async function proxy(request: NextRequest) {
   const response = NextResponse.next({
@@ -12,7 +15,9 @@ export async function proxy(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() { return request.cookies.getAll(); },
+        getAll() {
+          return request.cookies.getAll();
+        },
         setAll(cookiesToSet) {
           cookiesToSet.forEach(({ name, value, options }) => {
             request.cookies.set({ name, value, ...options });
@@ -25,14 +30,14 @@ export async function proxy(request: NextRequest) {
 
   let user = null;
   try {
-    const { data: { user: u } } = await supabase.auth.getUser();
+    const {
+      data: { user: u },
+    } = await supabase.auth.getUser();
     user = u;
   } catch (err) {
-    // Stale/invalid session cookie (e.g. refresh_token_not_found — token was
-    // rotated/revoked server-side). Clear every Supabase auth cookie so we
-    // don't retry + fail on every request; protected routes redirect to login.
-    console.debug("proxy: stale session cookie, clearing auth cookies:", (err as Error)?.message);
-    request.cookies.getAll()
+    logger.debug("proxy: stale session cookie, clearing auth cookies:", (err as Error)?.message);
+    request.cookies
+      .getAll()
       .filter((c) => c.name.startsWith("sb-"))
       .forEach((c) => {
         response.cookies.set({ name: c.name, value: "", maxAge: 0, path: "/" });
@@ -40,13 +45,19 @@ export async function proxy(request: NextRequest) {
   }
   const path = request.nextUrl.pathname;
 
-  // ✅ PUBLIC routes — no login required
-  // /setup = first-run admin creation — login se PEHLE accessible hona chahiye
-  const isPublic = ["/", "/about", "/contact", "/job-status", "/track", "/login", "/setup", "/stage-lighting", "/industrial", "/power-supply"].some(r =>
-    path === r || path.startsWith(r + "/")
-  );
+  const isPublic = [
+    "/",
+    "/about",
+    "/contact",
+    "/job-status",
+    "/track",
+    "/login",
+    "/setup",
+    "/stage-lighting",
+    "/industrial",
+    "/power-supply",
+  ].some((r) => path === r || path.startsWith(r + "/"));
 
-  // Skip static files (Next assets, public/ files like images, manifest, sw, tools html)
   if (
     path.startsWith("/_next") ||
     path.includes("favicon") ||
@@ -56,19 +67,43 @@ export async function proxy(request: NextRequest) {
     return response;
   }
 
-  // Public route → allow access
   if (isPublic) {
     return response;
   }
 
-  // Protected route → require login
   if (!user) {
     return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  // ── LITE MODE ROUTE GUARD ───────────────────────────────────────────────
+  // Sirf login + attendance + staff wale routes allowed. Baaki (jobs, clients,
+  // reports, AI, finance...) → /dashboard. Ye hard redirect Link-prefetch ki RSC
+  // fetches ko bhi fail kar deta hai → lite build me baaki modules ka JS kabhi
+  // download nahi hota.
+  if (LITE_MODE && !isLiteRouteAllowed(path)) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+
+  // Session age check: absolute hard cap via login timestamp cookie
+  const loginTs = request.cookies.get("vtech_session_start")?.value;
+  if (loginTs) {
+    const age = Date.now() - Number(loginTs);
+    if (age > ABSOLUTE_MS) {
+      await supabase.auth.signOut();
+      const allCookies = request.cookies.getAll();
+      const res = NextResponse.redirect(new URL("/login?reason=idle", request.url));
+      for (const c of allCookies) {
+        if (c.name.startsWith("sb-") || c.name === "vtech_session_start") {
+          res.cookies.set(c.name, "", { maxAge: 0, path: "/" });
+        }
+      }
+      return res;
+    }
   }
 
   return response;
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 };

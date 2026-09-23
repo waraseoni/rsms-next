@@ -1,10 +1,9 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+import { JOB_STATUS_INLINE } from "@/lib/status-colors";
+
+const supabase = getAdminSupabase();
 
 const SHOP = {
   name: "V-Technologies",
@@ -12,27 +11,28 @@ const SHOP = {
   mobile: "9179105875",
 };
 
-const STATUS_CONFIG: Record<number, { label: string; color: string; bg: string; desc: string }> = {
-  0: { label: "Pending", color: "#f59e0b", bg: "#fff7ed", desc: "Work not started yet" },
-  1: { label: "On-Progress", color: "#667eea", bg: "#eef2ff", desc: "Work in progress" },
-  2: { label: "Done", color: "#3b82f6", bg: "#eff6ff", desc: "Work completed" },
-  3: { label: "Paid", color: "#10b981", bg: "#ecfdf5", desc: "Payment received" },
-  4: { label: "Cancelled", color: "#ef4444", bg: "#fef2f2", desc: "Transaction cancelled" },
-  5: { label: "Delivered", color: "#059669", bg: "#ecfdf5", desc: "Item delivered to customer" },
-};
+const STATUS_CONFIG = JOB_STATUS_INLINE;
 
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
   return new Intl.DateTimeFormat("en-IN", {
-    timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric",
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
   }).format(new Date(iso));
 }
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return "—";
   return new Intl.DateTimeFormat("en-IN", {
-    timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric",
-    hour: "2-digit", minute: "2-digit", hour12: true,
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
   }).format(new Date(iso));
 }
 
@@ -71,7 +71,12 @@ export async function GET(request: NextRequest) {
   }
 
   const txn = txnData[0];
-  const statusInfo = STATUS_CONFIG[txn.status] || { label: "Unknown", color: "#6b7280", bg: "#f3f4f6", desc: "Status unknown" };
+  const statusInfo = STATUS_CONFIG[txn.status] || {
+    label: "Unknown",
+    color: "#6b7280",
+    bg: "#f3f4f6",
+    desc: "Status unknown",
+  };
 
   const { data: svcData } = await supabase
     .from("transaction_services")
@@ -81,8 +86,14 @@ export async function GET(request: NextRequest) {
   const serviceIds = (svcData || []).map((s) => s.service_id).filter(Boolean);
   const serviceNames: Record<number, string> = {};
   if (serviceIds.length > 0) {
-    const { data: services } = await supabase.from("service_list").select("id, name").in("id", serviceIds);
-    if (services) services.forEach((s) => { serviceNames[s.id] = s.name; });
+    const { data: services } = await supabase
+      .from("service_list")
+      .select("id, name")
+      .in("id", serviceIds);
+    if (services)
+      services.forEach((s) => {
+        serviceNames[s.id] = s.name;
+      });
   }
 
   const services = (svcData || []).map((s) => ({
@@ -92,18 +103,24 @@ export async function GET(request: NextRequest) {
 
   const { data: prodData } = await supabase
     .from("transaction_products")
-    .select("product_id, qty, price")
+    .select("product_id, product_name, qty, price")
     .eq("transaction_id", txn.id);
 
   const productIds = (prodData || []).map((p) => p.product_id).filter(Boolean);
   const productNames: Record<number, string> = {};
   if (productIds.length > 0) {
-    const { data: products } = await supabase.from("product_list").select("id, name").in("id", productIds);
-    if (products) products.forEach((p) => { productNames[p.id] = p.name; });
+    const { data: products } = await supabase
+      .from("product_list")
+      .select("id, name")
+      .in("id", productIds);
+    if (products)
+      products.forEach((p) => {
+        productNames[p.id] = p.name;
+      });
   }
 
   const products = (prodData || []).map((p) => ({
-    product_name: productNames[p.product_id] || "Unknown",
+    product_name: p.product_name || productNames[p.product_id] || "Unknown",
     qty: p.qty,
     price: p.price,
     total: p.qty * p.price,
@@ -165,24 +182,32 @@ export async function GET(request: NextRequest) {
       <div class="job-row"><span class="job-label">Created</span><span class="job-value">${fmtDate(txn.date_created)}</span></div>
       <div><span class="job-label">Status</span><br><span class="status-badge" style="background:${statusInfo.bg};color:${statusInfo.color};border:2px solid ${statusInfo.color}">${statusInfo.label}</span></div>
     </div>
-    ${services.length > 0 ? `
+    ${
+      services.length > 0
+        ? `
     <div class="card-title">Services (${services.length})</div>
     <table>
       <thead><tr><th>#</th><th>Service</th><th style="text-align:right">Amount</th></tr></thead>
       <tbody>
-        ${services.map((s, i) => `<tr><td>${i+1}</td><td>${s.service_name}</td><td style="text-align:right">${inr(s.price)}</td></tr>`).join("")}
+        ${services.map((s, i) => `<tr><td>${i + 1}</td><td>${s.service_name}</td><td style="text-align:right">${inr(s.price)}</td></tr>`).join("")}
         <tr class="total-row"><td colspan="2" style="text-align:right">Total:</td><td style="text-align:right">${inr(totalServices)}</td></tr>
       </tbody>
-    </table>` : ""}
-    ${products.length > 0 ? `
+    </table>`
+        : ""
+    }
+    ${
+      products.length > 0
+        ? `
     <div class="card-title">Products (${products.length})</div>
     <table>
       <thead><tr><th>#</th><th>Product</th><th style="text-align:center">Qty</th><th style="text-align:right">Rate</th><th style="text-align:right">Total</th></tr></thead>
       <tbody>
-        ${products.map((p, i) => `<tr><td>${i+1}</td><td>${p.product_name}</td><td style="text-align:center">${p.qty}</td><td style="text-align:right">${inr(p.price)}</td><td style="text-align:right">${inr(p.total)}</td></tr>`).join("")}
+        ${products.map((p, i) => `<tr><td>${i + 1}</td><td>${p.product_name}</td><td style="text-align:center">${p.qty}</td><td style="text-align:right">${inr(p.price)}</td><td style="text-align:right">${inr(p.total)}</td></tr>`).join("")}
         <tr class="total-row"><td colspan="4" style="text-align:right">Total:</td><td style="text-align:right">${inr(totalProducts)}</td></tr>
       </tbody>
-    </table>` : ""}
+    </table>`
+        : ""
+    }
     <div class="grand-total">Grand Total: ${inr(total)}</div>
     <div class="actions">
       <button onclick="window.print()" class="btn btn-print">🖨 Print</button>

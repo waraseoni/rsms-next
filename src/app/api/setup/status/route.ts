@@ -1,5 +1,6 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+
 import { getServerSupabase } from "@/lib/api-auth";
 
 // GET /api/setup/status
@@ -8,13 +9,11 @@ import { getServerSupabase } from "@/lib/api-auth";
 export async function GET() {
   try {
     const supabase = await getServerSupabase();
-    const { data: { user } } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
+    const {
+      data: { user },
+    } = await supabase.auth.getUser().catch(() => ({ data: { user: null } }));
 
-    const adminClient = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      { auth: { autoRefreshToken: false, persistSession: false } }
-    );
+    const adminClient = getAdminSupabase();
     const { data: admins, error } = await adminClient
       .from("profiles")
       .select("id")

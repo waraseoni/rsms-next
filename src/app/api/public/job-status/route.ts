@@ -1,10 +1,7 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+const supabase = getAdminSupabase();
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
@@ -52,8 +49,14 @@ export async function GET(request: NextRequest) {
   const serviceIds = (svcData || []).map((s) => s.service_id).filter(Boolean);
   const serviceNames: Record<number, string> = {};
   if (serviceIds.length > 0) {
-    const { data: services } = await supabase.from("service_list").select("id, name").in("id", serviceIds);
-    if (services) services.forEach((s) => { serviceNames[s.id] = s.name; });
+    const { data: services } = await supabase
+      .from("service_list")
+      .select("id, name")
+      .in("id", serviceIds);
+    if (services)
+      services.forEach((s) => {
+        serviceNames[s.id] = s.name;
+      });
   }
 
   const services = (svcData || []).map((s) => ({
@@ -63,18 +66,24 @@ export async function GET(request: NextRequest) {
 
   const { data: prodData } = await supabase
     .from("transaction_products")
-    .select("product_id, qty, price")
+    .select("product_id, product_name, qty, price")
     .eq("transaction_id", txn.id);
 
   const productIds = (prodData || []).map((p) => p.product_id).filter(Boolean);
   const productNames: Record<number, string> = {};
   if (productIds.length > 0) {
-    const { data: products } = await supabase.from("product_list").select("id, name").in("id", productIds);
-    if (products) products.forEach((p) => { productNames[p.id] = p.name; });
+    const { data: products } = await supabase
+      .from("product_list")
+      .select("id, name")
+      .in("id", productIds);
+    if (products)
+      products.forEach((p) => {
+        productNames[p.id] = p.name;
+      });
   }
 
   const products = (prodData || []).map((p) => ({
-    product_name: productNames[p.product_id] || "Unknown",
+    product_name: p.product_name || productNames[p.product_id] || "Unknown",
     qty: p.qty,
     price: p.price,
     total: p.qty * p.price,

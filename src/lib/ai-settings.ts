@@ -18,14 +18,17 @@ export async function getAiSettings(): Promise<AiSettings> {
     .in("meta_field", ["ai_provider", "ai_api_key", "ai_model"]);
 
   const info: Record<string, string> = {};
-  (data || []).forEach((r) => { info[r.meta_field] = r.meta_value; });
+  (data || []).forEach((r) => {
+    info[r.meta_field] = r.meta_value;
+  });
 
   const provider = info.ai_provider || "gemini";
   const envKey = provider === "groq" ? process.env.GROQ_API_KEY : process.env.GEMINI_API_KEY;
 
   return {
     provider,
-    apiKey: envKey || info.ai_api_key || "",
-    model: info.ai_model || "gemini-2.5-flash",
+    // Settings page (DB) ki key priority — env sirf fallback jab DB me key na ho
+    apiKey: info.ai_api_key || envKey || "",
+    model: info.ai_model || "openai/gpt-oss-120b",
   };
 }

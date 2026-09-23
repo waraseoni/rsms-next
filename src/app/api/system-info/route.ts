@@ -1,67 +1,55 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextResponse } from "next/server";
-import { createServerClient } from "@supabase/ssr";
-import { cookies } from "next/headers";
+
+// Public business info — client apne Settings (system_info) se manage karta hai.
+// SIRF safe public fields return karte hain (name/contact/address/timing).
+// Service role bypasses RLS — isliye response sirf ye whitelisted fields deta hai.
+const supabase = getAdminSupabase();
+
+function fmt12h(t: string): string {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (!m) return t;
+  let h = parseInt(m[1], 10);
+  const min = m[2];
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${h}:${min} ${ap}`;
+}
+
+function fmtPhone(contact: string | undefined): string {
+  if (!contact) return "";
+  const c = contact.trim();
+  if (!c) return "";
+  return c.startsWith("+") ? c : `+91 ${c}`;
+}
 
 export async function GET() {
-  const cookieStore = await cookies();
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() { return cookieStore.getAll(); },
-        setAll(cookiesToSet) { cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options)); },
-      },
-    }
-  );
+  const { data, error } = await supabase.from("system_info").select("meta_field, meta_value");
 
-  // Fetch from meta table (meta_field, meta_value pattern)
-  const { data: metaRows, error } = await supabase
-    .from("system_info")
-    .select("meta_field, meta_value");
-
-  if (error) {
-    console.error("System info fetch error:", error);
+  if (error || !data) {
+    return NextResponse.json({ error: "system_info unavailable" }, { status: 500 });
   }
 
-  if (error || !metaRows || metaRows.length === 0) {
-    // Fallback to default values if DB fails
-    console.log("Using fallback values for system_info");
-    return NextResponse.json({
-      shop_name: "V-Technologies",
-      short_name: "V-Tech",
-      tagline: "Repair & Service Experts",
-      phone: "+91 91791 05875",
-      whatsapp: "+91 91791 05875",
-      email: "vtech.jbp@gmail.com",
-      address: "F4 Hotel Plaza (Madhushala), Besides Jayanti Complex, Marhatal, Jabalpur, MP 482002",
-      website_url: null,
-      gst_number: null,
-      established_year: 2007,
-      business_hours: "Mon-Sat: 10 AM - 8 PM",
-    });
-  }
-
-  // Convert meta_field/meta_value to object
-  const metaMap: Record<string, string> = {};
-  metaRows.forEach(row => {
-    metaMap[row.meta_field] = row.meta_value;
+  const meta: Record<string, string> = {};
+  (data as Array<{ meta_field: string; meta_value: string | null }>).forEach((r) => {
+    if (r.meta_value != null) meta[r.meta_field] = String(r.meta_value);
   });
 
-  // Map meta fields to our expected format
-  const bizHours = `${metaMap.biz_days || "Mon-Sat"} · ${metaMap.biz_open || "10:00"} - ${metaMap.biz_close || "20:00"}`;
+  const open = fmt12h(meta.biz_open || "10:00");
+  const close = fmt12h(meta.biz_close || "20:00");
+  const hours =
+    meta.biz_open || meta.biz_close ? `${meta.biz_days || "Mon-Sat"} · ${open} – ${close}` : "";
+
+  const year = meta.established_year ? Number(meta.established_year) : null;
 
   return NextResponse.json({
-    shop_name: metaMap.name || "V-Technologies",
-    short_name: metaMap.short_name || "V-Tech",
-    tagline: "Repair & Service Experts",
-    phone: metaMap.contact ? `+91 ${metaMap.contact}` : "+91 91791 05875",
-    whatsapp: metaMap.contact ? `+91 ${metaMap.contact}` : "+91 91791 05875",
-    email: metaMap.email || "vtech.jbp@gmail.com",
-    address: metaMap.address || "F4 Hotel Plaza (Madhushala), Besides Jayanti Complex, Marhatal, Jabalpur, MP 482002",
-    website_url: null,
-    gst_number: metaMap.gst_no || metaMap.gstin || null,
-    established_year: 2007,
-    business_hours: bizHours,
+    shop_name: meta.name || "",
+    short_name: meta.short_name || "",
+    phone: fmtPhone(meta.contact),
+    whatsapp: fmtPhone(meta.contact),
+    email: meta.email || "",
+    address: meta.address || "",
+    business_hours: hours,
+    established_year: year && !isNaN(year) ? year : null,
   });
 }

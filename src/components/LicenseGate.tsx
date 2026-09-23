@@ -1,8 +1,21 @@
 "use client";
 
 import { useState } from "react";
-import { KeyRound, LogOut, RefreshCw, ShieldAlert, Loader2 } from "lucide-react";
+import {
+  KeyRound,
+  LogOut,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  Loader2,
+  Phone,
+  MessageCircle,
+  MapPin,
+  User,
+  Mail,
+} from "lucide-react";
 import type { LicenseStatus } from "@/lib/license";
+import { SELLER_INFO } from "@/lib/seller-info";
 
 // License expiry / trial mode ke time par full-screen gate.
 // Login hamesha allowed hai — login ke BAAD ye gate dikhta hai taaki admin naya
@@ -22,6 +35,8 @@ export default function LicenseGate({
   const [key, setKey] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const [fixMsg, setFixMsg] = useState("");
 
   const expired = !!status.expiresAt && new Date(status.expiresAt).getTime() < Date.now();
 
@@ -67,108 +82,230 @@ export default function LicenseGate({
     }
   };
 
+  // Auto-fix: agar profile missing/galat role hai to fix karo
+  const handleFixRole = async () => {
+    setFixing(true);
+    setFixMsg("");
+    try {
+      const res = await fetch("/api/debug/fix-role", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setFixMsg(data.error || "Fix nahi ho paya");
+        return;
+      }
+      setFixMsg(
+        data.action === "promoted_to_admin"
+          ? "Role fixed! Admin banaya gaya hai. Page refresh ho raha hai..."
+          : data.action === "created_as_admin"
+            ? "Profile banayi gayi hai (admin). Page refresh ho raha hai..."
+            : "Aap pehle se admin hain."
+      );
+      if (data.action !== "already_admin") {
+        setTimeout(() => window.location.reload(), 1200);
+      }
+    } catch {
+      setFixMsg("Server se connect nahi ho paya.");
+    } finally {
+      setFixing(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#0d1117] flex items-center justify-center px-4 py-10">
       <div className="w-full max-w-md">
         <div className="bg-[#111520] border border-[#21293d] rounded-3xl p-8 shadow-2xl shadow-black/50 anim-fade">
-          {/* Icon */}
-          <div
-            className={`w-14 h-14 rounded-2xl flex items-center justify-center mb-5 ${
-              expired ? "bg-red-500/15 text-red-400" : "bg-amber-500/15 text-amber-400"
-            }`}
-          >
-            {expired ? <ShieldAlert size={26} /> : <KeyRound size={26} />}
+          {/* ── Header: icon + title + badge + message — sab compact ── */}
+          <div className="flex items-start gap-3.5">
+            <div
+              className={`w-12 h-12 rounded-xl flex items-center justify-center shrink-0 ${
+                expired ? "bg-red-500/15 text-red-400" : "bg-amber-500/15 text-amber-400"
+              }`}
+            >
+              {expired ? <ShieldAlert size={22} /> : <KeyRound size={22} />}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h1 className="text-lg font-black text-white tracking-tight">
+                  {expired
+                    ? "License Expired"
+                    : status.activated
+                      ? "License Invalid"
+                      : "Trial Mode"}
+                </h1>
+                <span
+                  className={`inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider border ${
+                    expired
+                      ? "text-red-400 border-red-500/25 bg-red-500/10"
+                      : "text-amber-400 border-amber-500/25 bg-amber-500/10"
+                  }`}
+                >
+                  {expired ? "Expired" : status.activated ? "Invalid" : "Trial"}
+                </span>
+              </div>
+              <p className="text-[12px] text-slate-400 mt-1 leading-relaxed">
+                {expired ? (
+                  <>
+                    Aapka license{" "}
+                    <span className="text-red-400 font-bold">
+                      {new Date(status.expiresAt!).toLocaleDateString("en-IN", {
+                        day: "numeric",
+                        month: "long",
+                        year: "numeric",
+                      })}
+                    </span>{" "}
+                    ko khatam ho gaya hai.
+                  </>
+                ) : status.activated ? (
+                  reasonText ||
+                  "License abhi active nahi hai. System ko chalaane ke liye naya key chahiye."
+                ) : (
+                  "System unlock karne ke liye license key daalein."
+                )}
+              </p>
+            </div>
           </div>
 
-          {/* Title */}
-          <h1 className="text-xl font-black text-white tracking-tight">
-            {expired ? "License Expired" : status.activated ? "License Invalid" : "Trial Mode"}
-          </h1>
-          <p className="text-[13px] text-slate-400 mt-1.5 leading-relaxed">
-            {expired ? (
-              <>
-                Aapka license{" "}
-                <span className="text-red-400 font-bold">
-                  {new Date(status.expiresAt!).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}
-                </span>{" "}
-                ko khatam ho gaya hai.
-              </>
-            ) : status.activated ? (
-              reasonText ? (
-                <>{reasonText}</>
-              ) : (
-                "License abhi active nahi hai. System ko chalaane ke liye naya key chahiye."
-              )
-            ) : (
-              "Ye system bina license (trial mode) mein hai. System unlock karne ke liye license key daalein."
-            )}
-          </p>
-
+          {/* ── Shop name ── */}
           {status.shopName && (
-            <div className="mt-4 flex items-center justify-between bg-[#1a2234] rounded-xl px-4 py-3">
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Shop</span>
+            <div className="mt-3.5 flex items-center justify-between bg-[#1a2234] rounded-xl px-4 py-2.5">
+              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                Shop
+              </span>
               <span className="text-xs font-bold text-slate-200">{status.shopName}</span>
             </div>
           )}
 
-          {/* ── Key form (sirf admin) ── */}
-          {isAdmin ? (
-            <form onSubmit={handleActivate} className="mt-6 space-y-3">
-              <div>
-                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5">
-                  License Key (VTC-XXXX-XXXX-XXXX-XXXX)
-                </label>
-                <input
-                  type="text"
-                  value={key}
-                  onChange={(e) => setKey(e.target.value.toUpperCase())}
-                  placeholder="VTC-XXXX-XXXX-XXXX-XXXX"
-                  autoCapitalize="characters"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  className="w-full px-4 py-3 bg-[#0d1117] border border-[#21293d] rounded-xl text-sm font-mono font-bold tracking-wider text-slate-100 placeholder:text-slate-600 placeholder:font-sans outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
-                />
-              </div>
+          {/* ── Seller contact info ── */}
+          <div className="mt-3.5 bg-[#0f1a2e] border border-blue-500/15 rounded-xl p-3.5 space-y-2">
+            <p className="text-[10px] font-black uppercase tracking-widest text-blue-400/70 mb-2">
+              License ke liye sampark karein
+            </p>
+            <div className="flex items-center gap-2.5">
+              <User size={12} className="text-slate-500 shrink-0" />
+              <span className="text-[11px] text-slate-300">{SELLER_INFO.name}</span>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <MapPin size={12} className="text-slate-500 shrink-0" />
+              <span className="text-[11px] text-slate-300 leading-snug">{SELLER_INFO.address}</span>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <Phone size={12} className="text-slate-500 shrink-0" />
+              <a
+                href={`tel:${SELLER_INFO.phone}`}
+                className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                {SELLER_INFO.phone}
+              </a>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <MessageCircle size={12} className="text-emerald-500 shrink-0" />
+              <a
+                href={`https://wa.me/${SELLER_INFO.whatsapp}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] text-emerald-400 hover:text-emerald-300 transition-colors"
+              >
+                WhatsApp par message karein
+              </a>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <Mail size={12} className="text-slate-500 shrink-0" />
+              <a
+                href={`mailto:${SELLER_INFO.email}`}
+                className="text-[11px] text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                {SELLER_INFO.email}
+              </a>
+            </div>
+          </div>
 
-              {error && (
-                <p className="text-xs font-semibold text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
-                  {error}
-                </p>
-              )}
+          {/* ── Key form ── */}
+          <form onSubmit={handleActivate} className="mt-5 space-y-3">
+            <div>
+              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5">
+                License Key (VTC-XXXX-XXXX-XXXX-XXXX)
+              </label>
+              <input
+                type="text"
+                value={key}
+                onChange={(e) => setKey(e.target.value.toUpperCase())}
+                placeholder="VTC-XXXX-XXXX-XXXX-XXXX"
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                className="w-full px-4 py-3 bg-[#0d1117] border border-[#21293d] rounded-xl text-sm font-mono font-bold tracking-wider text-slate-100 placeholder:text-slate-600 placeholder:font-sans outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/20 transition-all"
+              />
+            </div>
 
+            {error && (
+              <p className="text-xs font-semibold text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                {error}
+              </p>
+            )}
+
+            <div className="flex gap-2">
               <button
                 type="submit"
                 disabled={busy || key.trim().length < 5}
-                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-black tracking-wide transition-all"
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-black tracking-wide transition-all"
               >
                 {busy ? (
                   <>
-                    <Loader2 size={16} className="animate-spin" /> Activating...
+                    <Loader2 size={14} className="animate-spin" /> Activating...
                   </>
                 ) : (
                   <>
-                    <KeyRound size={15} /> Activate License
+                    <KeyRound size={13} /> Activate License
                   </>
                 )}
               </button>
-
               <button
                 type="button"
-                onClick={() => { setError(""); onActivated(); }}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:text-slate-300 transition-colors"
+                onClick={() => {
+                  setError("");
+                  onActivated();
+                }}
+                className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-xl border border-[#21293d] text-xs font-bold text-slate-500 hover:text-slate-300 hover:border-slate-500/50 transition-colors"
               >
-                <RefreshCw size={13} /> Status refresh karein
+                <RefreshCw size={12} /> Refresh
               </button>
-            </form>
-          ) : (
-            <div className="mt-6 bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 text-xs text-amber-200/90 font-semibold leading-relaxed">
-              Is shop ka license active nahi hai. Kripya shop ke admin / seller se
-              renew karwane ki request karein.
+            </div>
+          </form>
+
+          {/* ── Non-admin: auto-fix button ── */}
+          {!isAdmin && (
+            <div className="mt-4 space-y-2">
+              <p className="text-[10px] font-bold text-amber-400/70 text-center">
+                Agar aap admin hain par system nahi maan raha:
+              </p>
+              <button
+                type="button"
+                onClick={handleFixRole}
+                disabled={fixing}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/30 text-amber-300 text-xs font-black tracking-wide transition-all disabled:opacity-50"
+              >
+                {fixing ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" /> Fixing...
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck size={14} /> Fix Admin Role (Auto)
+                  </>
+                )}
+              </button>
+              {fixMsg && (
+                <p
+                  className={`text-[11px] font-semibold text-center ${fixMsg.includes("nahi") || fixMsg.includes("galat") ? "text-red-400" : "text-emerald-400"}`}
+                >
+                  {fixMsg}
+                </p>
+              )}
             </div>
           )}
 
-          {/* ── Logout — kabhi bhi available, taaki koi atka na rahe ── */}
-          <div className="mt-6 pt-5 border-t border-[#1a2234] flex items-center justify-between">
+          {/* ── Footer ── */}
+          <div className="mt-5 pt-4 border-t border-[#1a2234] flex items-center justify-between">
             <span className="text-[9px] font-black uppercase tracking-widest text-slate-700">
               V-TECH PRO · Licensing
             </span>

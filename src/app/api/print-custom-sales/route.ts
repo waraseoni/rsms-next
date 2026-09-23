@@ -1,19 +1,26 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+
 import { requireStaff } from "@/lib/api-auth";
 import { fetchAll } from "@/lib/fetch-all";
 
-const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+const supabase = getAdminSupabase();
 
 const inr = (n: number) => "₹" + (n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 });
 
 function formatDate(iso: string) {
-  return Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric" }).format(new Date(iso));
+  return Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(iso));
 }
 
 export async function GET(request: NextRequest) {
   const user = await requireStaff();
-  if (!user) return NextResponse.json({ error: "Unauthorized \u2014 pehle login karein" }, { status: 401 });
+  if (!user)
+    return NextResponse.json({ error: "Unauthorized \u2014 pehle login karein" }, { status: 401 });
   const { searchParams } = new URL(request.url);
   const from = searchParams.get("from") || "";
   const to = searchParams.get("to") || "";
@@ -21,25 +28,50 @@ export async function GET(request: NextRequest) {
   const fromTs = `${from}T00:00:00+05:30`;
   const toTs = `${to}T23:59:59+05:30`;
 
-  const tpData = await fetchAll(
+  const txns = await fetchAll(
     supabase
-      .from("transaction_products").select("product_id, price, qty, date_updated, transaction_id")
-      .gte("date_updated", fromTs).lte("date_updated", toTs)
+      .from("transaction_list")
+      .select("id, code, client_name, status, date_updated")
+      .gte("date_updated", fromTs)
+      .lte("date_updated", toTs)
+      .in("status", [1, 2, 3, 5])
   );
 
-  const txnIds = [...new Set(tpData?.map((t: { transaction_id: number }) => t.transaction_id) || [])];
-  const txns = [];
+  const txnIds = [...new Set(txns?.map((t: { id: number }) => t.id) || [])];
+  const tpData = [] as {
+    transaction_id: number;
+    product_id: number;
+    product_name?: string | null;
+    price: number;
+    qty: number;
+  }[];
   for (let i = 0; i < txnIds.length; i += 500) {
-    txns.push(...(await fetchAll(
-      supabase.from("transaction_list").select("id, code, client_name, status, date_updated")
-        .in("id", txnIds.slice(i, i + 500)).in("status", [1, 2, 3, 5])
-    )));
+    tpData.push(
+      ...(await fetchAll(
+        supabase
+          .from("transaction_products")
+          .select("transaction_id, product_id, product_name, price, qty")
+          .in("transaction_id", txnIds.slice(i, i + 500))
+      ))
+    );
   }
 
-  const clients = await fetchAll(supabase.from("client_list").select("id, firstname, middlename, lastname").eq("delete_flag", 0));
-  const products = await fetchAll(supabase.from("product_list").select("id, name").eq("delete_flag", 0));
+  const clients = await fetchAll(
+    supabase.from("client_list").select("id, firstname, middlename, lastname").eq("delete_flag", 0)
+  );
+  const products = await fetchAll(
+    supabase.from("product_list").select("id, name").eq("delete_flag", 0)
+  );
 
-  const saleRows: { date_updated: string; code: string | null; client_name: string; product_name: string; price: number; qty: number; total: number; }[] = [];
+  const saleRows: {
+    date_updated: string;
+    code: string | null;
+    client_name: string;
+    product_name: string;
+    price: number;
+    qty: number;
+    total: number;
+  }[] = [];
 
   for (const tp of tpData || []) {
     const txn = (txns || []).find((t: { id: number }) => t.id === tp.transaction_id);
@@ -47,10 +79,12 @@ export async function GET(request: NextRequest) {
     const client = (clients || []).find((c: { id: number }) => c.id === txn.client_name);
     const product = (products || []).find((p: { id: number }) => p.id === tp.product_id);
     saleRows.push({
-      date_updated: tp.date_updated || txn.date_updated,
+      date_updated: txn.date_updated,
       code: txn.code,
-      client_name: client ? [client.firstname, client.middlename, client.lastname].filter(Boolean).join(" ") : "Walk-in",
-      product_name: product?.name || "Unknown",
+      client_name: client
+        ? [client.firstname, client.middlename, client.lastname].filter(Boolean).join(" ")
+        : "Walk-in",
+      product_name: product?.name || tp.product_name || "Unknown",
       price: tp.price || 0,
       qty: tp.qty || 1,
       total: (tp.price || 0) * (tp.qty || 1),
@@ -110,7 +144,9 @@ export async function GET(request: NextRequest) {
       </tr>
     </thead>
     <tbody>
-      ${saleRows.map((r, i) => `
+      ${saleRows
+        .map(
+          (r, i) => `
       <tr>
         <td style="text-align:center">${i + 1}</td>
         <td>${formatDate(r.date_updated)}</td>
@@ -120,7 +156,9 @@ export async function GET(request: NextRequest) {
         <td style="text-align:right">${inr(r.price)}</td>
         <td style="text-align:right">${r.qty}</td>
         <td style="text-align:right;color:#059669">${inr(r.total)}</td>
-      </tr>`).join("")}
+      </tr>`
+        )
+        .join("")}
     </tbody>
     <tfoot>
       <tr class="total-row">

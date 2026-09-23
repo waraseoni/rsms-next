@@ -1,19 +1,26 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+
 import { requireStaff } from "@/lib/api-auth";
 import { fetchAll } from "@/lib/fetch-all";
 
-const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+const supabase = getAdminSupabase();
 
 const inr = (n: number) => "₹" + (n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 });
 
 function formatDate(iso: string) {
-  return Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric" }).format(new Date(iso));
+  return Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(iso));
 }
 
 export async function GET(request: NextRequest) {
   const user = await requireStaff();
-  if (!user) return NextResponse.json({ error: "Unauthorized \u2014 pehle login karein" }, { status: 401 });
+  if (!user)
+    return NextResponse.json({ error: "Unauthorized \u2014 pehle login karein" }, { status: 401 });
   const { searchParams } = new URL(request.url);
   const from = searchParams.get("from") || "";
   const to = searchParams.get("to") || "";
@@ -21,25 +28,47 @@ export async function GET(request: NextRequest) {
   const fromTs = `${from}T00:00:00+05:30`;
   const toTs = `${to}T23:59:59+05:30`;
 
-  const tsData = await fetchAll(
+  const txns = await fetchAll(
     supabase
-      .from("transaction_services").select("service_id, price, date_updated, transaction_id")
-      .gte("date_updated", fromTs).lte("date_updated", toTs)
+      .from("transaction_list")
+      .select("id, code, client_name, status, date_updated")
+      .gte("date_updated", fromTs)
+      .lte("date_updated", toTs)
+      .in("status", [1, 2, 3, 5])
   );
 
-  const txnIds = [...new Set(tsData?.map((t: { transaction_id: number }) => t.transaction_id) || [])];
-  const txns = [];
+  const txnIds = [...new Set(txns?.map((t: { id: number }) => t.id) || [])];
+  const tsData = [] as {
+    transaction_id: number;
+    service_id: number;
+    price: number;
+  }[];
   for (let i = 0; i < txnIds.length; i += 500) {
-    txns.push(...(await fetchAll(
-      supabase.from("transaction_list").select("id, code, client_name, status, date_updated")
-        .in("id", txnIds.slice(i, i + 500)).in("status", [1, 2, 3, 5])
-    )));
+    tsData.push(
+      ...(await fetchAll(
+        supabase
+          .from("transaction_services")
+          .select("service_id, price, transaction_id")
+          .in("transaction_id", txnIds.slice(i, i + 500))
+      ))
+    );
   }
 
-  const clients = await fetchAll(supabase.from("client_list").select("id, firstname, middlename, lastname").eq("delete_flag", 0));
-  const services = await fetchAll(supabase.from("service_list").select("id, name, description").eq("delete_flag", 0));
+  const clients = await fetchAll(
+    supabase.from("client_list").select("id, firstname, middlename, lastname").eq("delete_flag", 0)
+  );
+  const services = await fetchAll(
+    supabase.from("service_list").select("id, name, description").eq("delete_flag", 0)
+  );
 
-  const serviceRows: { date_updated: string; code: string | null; client_name: string; service_name: string; description: string | null; price: number; }[] = [];
+  const serviceRows: {
+    date_updated: string;
+    code: string | null;
+    client_name: string;
+    service_name: string;
+    description: string | null;
+    price: number;
+  }[] = [];
 
   for (const ts of tsData || []) {
     const txn = (txns || []).find((t: { id: number }) => t.id === ts.transaction_id);
@@ -47,16 +76,20 @@ export async function GET(request: NextRequest) {
     const client = (clients || []).find((c: { id: number }) => c.id === txn.client_name);
     const service = (services || []).find((s: { id: number }) => s.id === ts.service_id);
     serviceRows.push({
-      date_updated: ts.date_updated || txn.date_updated,
+      date_updated: txn.date_updated,
       code: txn.code,
-      client_name: client ? [client.firstname, client.middlename, client.lastname].filter(Boolean).join(" ") : "Walk-in",
+      client_name: client
+        ? [client.firstname, client.middlename, client.lastname].filter(Boolean).join(" ")
+        : "Walk-in",
       service_name: service?.name || "Unknown",
       description: service?.description || null,
       price: ts.price || 0,
     });
   }
 
-  serviceRows.sort((a, b) => new Date(a.date_updated).getTime() - new Date(b.date_updated).getTime());
+  serviceRows.sort(
+    (a, b) => new Date(a.date_updated).getTime() - new Date(b.date_updated).getTime()
+  );
 
   const total = serviceRows.reduce((s, r) => s + r.price, 0);
 
@@ -108,7 +141,9 @@ export async function GET(request: NextRequest) {
       </tr>
     </thead>
     <tbody>
-      ${serviceRows.map((r, i) => `
+      ${serviceRows
+        .map(
+          (r, i) => `
       <tr>
         <td style="text-align:center">${i + 1}</td>
         <td>${formatDate(r.date_updated)}</td>
@@ -117,7 +152,9 @@ export async function GET(request: NextRequest) {
         <td>${r.service_name}</td>
         <td>${r.description || "—"}</td>
         <td style="text-align:right;color:#059669">${inr(r.price)}</td>
-      </tr>`).join("")}
+      </tr>`
+        )
+        .join("")}
     </tbody>
     <tfoot>
       <tr class="total-row">

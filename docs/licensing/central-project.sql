@@ -33,6 +33,7 @@ create table if not exists public.licenses (
   max_activations integer not null default 1,         -- ek key kitne instances par chalega
   expires_at      timestamptz,                        -- NULL = lifetime
   status          text not null default 'active',     -- active | disabled | revoked
+  enabled_modules text[] default null,                -- NULL = sab enabled; '{jobs,clients,...}'
   notes           text,
   created_at      timestamptz not null default now()
 );
@@ -99,7 +100,8 @@ begin
      where id = existing.id;
     return json_build_object(
       'ok', true, 'plan', rec.plan, 'shop_name', rec.shop_name,
-      'expires_at', rec.expires_at, 'already_activated', true);
+      'expires_at', rec.expires_at, 'already_activated', true,
+      'enabled_modules', rec.enabled_modules);
   end if;
 
   -- Naya instance → max_activations check
@@ -113,7 +115,8 @@ begin
 
   return json_build_object(
     'ok', true, 'plan', rec.plan, 'shop_name', rec.shop_name,
-    'expires_at', rec.expires_at, 'already_activated', false);
+    'expires_at', rec.expires_at, 'already_activated', false,
+    'enabled_modules', rec.enabled_modules);
 end $$;
 
 -- ─── RPC: deactivate_license (seller manually revoke kar sake) ──────────────
@@ -161,13 +164,15 @@ begin
   if l.expires_at is not null and l.expires_at < now() then
     return json_build_object(
       'ok', false, 'error', 'LICENSE_EXPIRED',
-      'expires_at', l.expires_at, 'plan', l.plan, 'shop_name', l.shop_name);
+      'expires_at', l.expires_at, 'plan', l.plan, 'shop_name', l.shop_name,
+      'enabled_modules', l.enabled_modules);
   end if;
 
   update public.activations set last_seen_at = now() where id = a.id;
 
   return json_build_object(
-    'ok', true, 'plan', l.plan, 'shop_name', l.shop_name, 'expires_at', l.expires_at);
+    'ok', true, 'plan', l.plan, 'shop_name', l.shop_name, 'expires_at', l.expires_at,
+    'enabled_modules', l.enabled_modules);
 end $$;
 
 -- ─── Grant: sirf RPC functions callable, tables nahi ───────────────────────
@@ -205,6 +210,14 @@ create table if not exists public.client_credentials (
   vercel_password                text,
   custom_domain                  text,
   notes                          text,
+  -- Public site branding (per-client alag public site ke liye)
+  site_name                      text,
+  site_tagline                   text,
+  site_phone                     text,
+  site_email                     text,
+  site_address                   text,
+  site_owner                     text,
+  site_services                  text,
   updated_at                     timestamptz not null default now()
 );
 
@@ -217,6 +230,13 @@ alter table public.client_credentials add column if not exists github_password  
 alter table public.client_credentials add column if not exists vercel_email     text;
 alter table public.client_credentials add column if not exists vercel_password  text;
 alter table public.client_credentials add column if not exists custom_domain    text;
+alter table public.client_credentials add column if not exists site_name        text;
+alter table public.client_credentials add column if not exists site_tagline     text;
+alter table public.client_credentials add column if not exists site_phone       text;
+alter table public.client_credentials add column if not exists site_email       text;
+alter table public.client_credentials add column if not exists site_address     text;
+alter table public.client_credentials add column if not exists site_owner       text;
+alter table public.client_credentials add column if not exists site_services    text;
 
 alter table public.client_credentials enable row level security;
 revoke all on table public.client_credentials from anon, authenticated;
@@ -227,3 +247,8 @@ revoke all on table public.client_credentials from anon, authenticated;
 -- insert into public.licenses (license_key, shop_name, owner_name, plan, max_activations, status)
 -- values ('VTC-XXXX-XXXX-XXXX-XXXX', 'V-Technologies (Seller)', 'Owner', 'lifetime', 2, 'active')
 -- on conflict (license_key) do nothing;
+
+-- ─── MIGRATION: enabled_modules (existing databases ke liye) ────────────────
+-- Agar pehle se licenses table hai bina enabled_modules ke, toh ye chalao:
+alter table public.licenses add column if not exists enabled_modules text[] default null;
+-- NULL = sab enabled (backward compatible). Naye licenses ke liye seller modules select karega.

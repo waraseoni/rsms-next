@@ -21,8 +21,7 @@ export function generateLicenseKey(): string {
 }
 
 export const isLicenseAdminConfigured = () =>
-  !!process.env.LICENSE_SERVICE_URL &&
-  !!process.env.LICENSE_SERVICE_SERVICE_ROLE_KEY;
+  !!process.env.LICENSE_SERVICE_URL && !!process.env.LICENSE_SERVICE_SERVICE_ROLE_KEY;
 
 function makeLicenseAdminClient() {
   return createClient(
@@ -42,6 +41,7 @@ export type LicenseRow = {
   max_activations: number;
   expires_at: string | null;
   status: string;
+  enabled_modules: string[] | null;
   notes: string | null;
   created_at: string;
   activation_count?: number;
@@ -56,7 +56,9 @@ export async function listLicenses(): Promise<LicenseRow[]> {
     .order("created_at", { ascending: false });
   if (error) throw new Error(error.message);
 
-  const { data: acts } = await sb.from("activations").select("license_id, activated_at, last_seen_at");
+  const { data: acts } = await sb
+    .from("activations")
+    .select("license_id, activated_at, last_seen_at");
   const byLicense: Record<number, { count: number; lastSeen: string | null }> = {};
   (acts || []).forEach((a: { license_id: number; activated_at: string; last_seen_at: string }) => {
     const cur = byLicense[a.license_id] || { count: 0, lastSeen: null };
@@ -74,7 +76,13 @@ export async function listLicenses(): Promise<LicenseRow[]> {
 }
 
 export type LicenseDetail = LicenseRow & {
-  activations: { activation_id: string; shop_url: string | null; shop_name: string | null; activated_at: string; last_seen_at: string }[];
+  activations: {
+    activation_id: string;
+    shop_url: string | null;
+    shop_name: string | null;
+    activated_at: string;
+    last_seen_at: string;
+  }[];
 };
 
 export async function getLicense(id: number): Promise<LicenseDetail | null> {
@@ -109,6 +117,7 @@ export type LicenseInput = {
   max_activations?: number;
   expires_at?: string | null;
   status?: string;
+  enabled_modules?: string[] | null;
   notes?: string;
 };
 
@@ -127,6 +136,7 @@ export async function createLicense(input: LicenseInput): Promise<LicenseRow> {
         max_activations: input.max_activations ?? 1,
         expires_at: input.expires_at ?? null,
         status: input.status || "active",
+        enabled_modules: input.enabled_modules ?? null,
         notes: input.notes || null,
       })
       .select()
@@ -147,6 +157,7 @@ export async function updateLicense(id: number, input: LicenseInput): Promise<Li
   if (input.max_activations !== undefined) patch.max_activations = input.max_activations;
   if (input.expires_at !== undefined) patch.expires_at = input.expires_at ?? null;
   if (input.status !== undefined) patch.status = input.status;
+  if (input.enabled_modules !== undefined) patch.enabled_modules = input.enabled_modules;
   if (input.notes !== undefined) patch.notes = input.notes || null;
 
   const { data, error } = await sb.from("licenses").update(patch).eq("id", id).select().single();
@@ -163,7 +174,10 @@ export async function deleteLicense(id: number) {
 // ─── Developer stats — kitne clients ko license diye + expiry dates ─────────
 export async function getDevStats() {
   const sb = makeLicenseAdminClient();
-  const { data: licenses, error } = await sb.from("licenses").select("*").order("created_at", { ascending: false });
+  const { data: licenses, error } = await sb
+    .from("licenses")
+    .select("*")
+    .order("created_at", { ascending: false });
   if (error) throw new Error(error.message);
   const { data: activations } = await sb.from("activations").select("license_id");
 
@@ -183,7 +197,9 @@ export async function getDevStats() {
       days_left: expires !== null ? Math.ceil((expires - now) / 86400000) : null,
       active: l.status === "active" && !expired,
       expired,
-      activated_instances: (activations || []).filter((a: { license_id: number }) => a.license_id === l.id).length,
+      activated_instances: (activations || []).filter(
+        (a: { license_id: number }) => a.license_id === l.id
+      ).length,
     };
   });
 

@@ -1,17 +1,10 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { requireAdmin } from "@/lib/api-auth";
-import {
-  isValidLicenseKey,
-  makeActivationId,
-  activateRemoteLicense,
-} from "@/lib/license";
 
-const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { autoRefreshToken: false, persistSession: false } }
-);
+import { requireAdmin } from "@/lib/api-auth";
+import { isValidLicenseKey, makeActivationId, activateRemoteLicense } from "@/lib/license";
+
+const supabaseAdmin = getAdminSupabase();
 
 async function getShopName() {
   const { data } = await supabaseAdmin
@@ -38,12 +31,18 @@ export async function POST(req: NextRequest) {
   try {
     const admin = await requireAdmin();
     if (!admin) {
-      return NextResponse.json({ error: "Sirf Admin license activate kar sakta hai" }, { status: 403 });
+      return NextResponse.json(
+        { error: "Sirf Admin license activate kar sakta hai" },
+        { status: 403 }
+      );
     }
 
     const { key } = (await req.json()) as { key?: string };
     if (!key || !isValidLicenseKey(key)) {
-      return NextResponse.json({ error: "Invalid license key format — VTC-XXXX-XXXX-XXXX-XXXX" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid license key format — VTC-XXXX-XXXX-XXXX-XXXX" },
+        { status: 400 }
+      );
     }
 
     const host = req.headers.get("host") || "localhost";
@@ -62,8 +61,10 @@ export async function POST(req: NextRequest) {
         INVALID_KEY: "Ye license key valid nahi hai. Seller se verify karein.",
         LICENSE_DISABLED: "Ye license disabled kar diya gaya hai. Seller se contact karein.",
         LICENSE_EXPIRED: "Ye license expire ho chuka hai. Renewal ke liye seller se baat karein.",
-        MAX_ACTIVATIONS: "Ye license apne limit ke instances par already active hai. Seller se contact karein.",
-        LICENSE_SERVICE_NOT_CONFIGURED: "License service setup nahi hai (LICENSE_SERVICE_URL/ANON_KEY missing).",
+        MAX_ACTIVATIONS:
+          "Ye license apne limit ke instances par already active hai. Seller se contact karein.",
+        LICENSE_SERVICE_NOT_CONFIGURED:
+          "License service setup nahi hai (LICENSE_SERVICE_URL/ANON_KEY missing).",
       };
       const msg = friendly[res.error ?? ""] || res.error || "Activation failed";
       return NextResponse.json({ error: msg }, { status: 400 });
@@ -78,6 +79,7 @@ export async function POST(req: NextRequest) {
       activatedAt: now,
       expiresAt: res.expiresAt ?? null,
       activationId,
+      enabledModules: res.enabledModules ?? null,
     });
     await Promise.all([
       upsertField("license_key", key.trim().toUpperCase()),

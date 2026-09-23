@@ -1,19 +1,27 @@
+import { getAdminSupabase } from "@/lib/admin-supabase";
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-import { requireStaff } from "@/lib/api-auth";
-import { fetchAll } from "@/lib/fetch-all";
 
-const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+import { requireStaff } from "@/lib/api-auth";
+import { fetchAll, pageAll, fetchAllIn } from "@/lib/fetch-all";
+import { buildDueMaps, balanceFromMaps } from "@/lib/client-due";
+
+const supabase = getAdminSupabase();
 
 const inr = (n: number) => "₹" + (n || 0).toLocaleString("en-IN", { minimumFractionDigits: 0 });
 
 function formatDate(iso: string) {
-  return Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", year: "numeric" }).format(new Date(iso));
+  return Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(iso));
 }
 
 export async function GET(request: NextRequest) {
   const user = await requireStaff();
-  if (!user) return NextResponse.json({ error: "Unauthorized \u2014 pehle login karein" }, { status: 401 });
+  if (!user)
+    return NextResponse.json({ error: "Unauthorized \u2014 pehle login karein" }, { status: 401 });
   const { searchParams } = new URL(request.url);
   const filterType = searchParams.get("filterType") || "yearly";
   const selYear = parseInt(searchParams.get("selYear") || new Date().getFullYear().toString());
@@ -35,31 +43,88 @@ export async function GET(request: NextRequest) {
 
   const clients = await fetchAll(
     supabase
-      .from("client_list").select("id, firstname, middlename, lastname, contact")
+      .from("client_list")
+      .select("id, firstname, middlename, lastname, contact, opening_balance")
       .eq("delete_flag", 0)
   );
 
-  const topRows: { client_id: number; customer_name: string; contact: string | null; total_jobs: number; total_amount: number; total_payment: number; current_balance: number; }[] = [];
+  const ids = (clients || []).map((c) => c.id);
+
+  const [{ data: dueRepairs }, { data: dueDirect }, { data: duePmts }, { data: dueLoans }] =
+    await Promise.all([
+      pageAll(supabase.from("transaction_list").select("client_name, amount").eq("status", 5)),
+      fetchAllIn(
+        (ids: number[]) =>
+          supabase.from("direct_sales").select("client_id, total_amount").in("client_id", ids),
+        ids
+      ).then((rows) => ({ data: rows })),
+      fetchAllIn(
+        (ids: number[]) =>
+          supabase
+            .from("client_payments")
+            .select("client_id, amount, discount, loan_id")
+            .in("client_id", ids),
+        ids
+      ).then((rows) => ({ data: rows })),
+      fetchAllIn(
+        (ids: number[]) =>
+          supabase
+            .from("client_loans")
+            .select("id, client_id, total_payable")
+            .in("client_id", ids)
+            .eq("status", 1),
+        ids
+      ).then((rows) => ({ data: rows })),
+    ]);
+
+  const dueMaps = buildDueMaps({
+    repairs: dueRepairs,
+    directSales: dueDirect,
+    payments: duePmts,
+    loans: dueLoans,
+  });
+
+  const topRows: {
+    client_id: number;
+    customer_name: string;
+    contact: string | null;
+    total_jobs: number;
+    total_amount: number;
+    total_payment: number;
+    current_balance: number;
+  }[] = [];
 
   for (const c of clients || []) {
     const name = [c.firstname, c.middlename, c.lastname].filter(Boolean).join(" ");
+    const openingBalance = c.opening_balance || 0;
 
     const txns = await fetchAll(
       supabase
-        .from("transaction_list").select("id, amount, date_created")
-        .eq("client_name", c.id).in("status", [3, 5])
-        .gte("date_created", from).lte("date_created", to)
+        .from("transaction_list")
+        .select("id, amount, date_created")
+        .eq("client_name", c.id)
+        .eq("status", 5)
+        .gte("date_created", from)
+        .lte("date_created", to)
     );
 
     const pmts = await fetchAll(
       supabase
-        .from("client_payments").select("amount, discount, payment_date")
+        .from("client_payments")
+        .select("amount, discount, payment_date")
         .eq("client_id", c.id)
-        .gte("payment_date", from.split("T")[0]).lte("payment_date", to.split("T")[0])
+        .gte("payment_date", from.split("T")[0])
+        .lte("payment_date", to.split("T")[0])
     );
 
-    const totalAmt = txns?.reduce((s: number, t: { amount: number }) => s + (t.amount || 0), 0) || 0;
-    const totalPmt = pmts?.reduce((s: number, p: { amount: number; discount: number }) => s + (p.amount || 0) + (p.discount || 0), 0) || 0;
+    const totalAmt =
+      txns?.reduce((s: number, t: { amount: number }) => s + (t.amount || 0), 0) || 0;
+    const totalPmt =
+      pmts?.reduce(
+        (s: number, p: { amount: number; discount: number }) =>
+          s + (p.amount || 0) + (p.discount || 0),
+        0
+      ) || 0;
 
     if (totalAmt > 0 || totalPmt > 0) {
       topRows.push({
@@ -69,7 +134,7 @@ export async function GET(request: NextRequest) {
         total_jobs: txns?.length || 0,
         total_amount: totalAmt,
         total_payment: totalPmt,
-        current_balance: totalAmt - totalPmt,
+        current_balance: balanceFromMaps(dueMaps, c.id, openingBalance),
       });
     }
   }
@@ -79,11 +144,20 @@ export async function GET(request: NextRequest) {
 
   const grandTotal = rows.reduce((s, r) => s + r.total_amount, 0);
   const grandPayment = rows.reduce((s, r) => s + r.total_payment, 0);
-  const grandBalance = rows.reduce((s, r) => s + r.current_balance, 0);
+  const grandBalance = rows.reduce(
+    (s, r) => s + (r.current_balance > 0 ? r.current_balance : 0),
+    0
+  );
 
-  const filterLabel = filterType === "monthly"
-    ? new Date(selYear, selMonth - 1, 1).toLocaleString("en-IN", { month: "long", year: "numeric" })
-    : filterType === "yearly" ? `${selYear}` : "All Time";
+  const filterLabel =
+    filterType === "monthly"
+      ? new Date(selYear, selMonth - 1, 1).toLocaleString("en-IN", {
+          month: "long",
+          year: "numeric",
+        })
+      : filterType === "yearly"
+        ? `${selYear}`
+        : "All Time";
 
   const html = `<!DOCTYPE html>
 <html>
@@ -158,7 +232,9 @@ export async function GET(request: NextRequest) {
       </tr>
     </thead>
     <tbody>
-      ${rows.map((r, i) => `
+      ${rows
+        .map(
+          (r, i) => `
       <tr>
         <td class="rank">${i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : i + 1}</td>
         <td>${r.customer_name}</td>
@@ -167,7 +243,9 @@ export async function GET(request: NextRequest) {
         <td class="num" style="color:#059669">${inr(r.total_amount)}</td>
         <td class="num" style="color:#0d9488">${inr(r.total_payment)}</td>
         <td class="num" style="color:${r.current_balance >= 0 ? "#2563eb" : "#dc2626"}">${inr(Math.abs(r.current_balance))}</td>
-      </tr>`).join("")}
+      </tr>`
+        )
+        .join("")}
     </tbody>
   </table>
 

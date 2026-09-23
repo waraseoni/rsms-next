@@ -15,7 +15,10 @@ export const currentMonthIST = (): string => {
   return todayIST().slice(0, 7); // YYYY-MM
 };
 
-export const formatIST = (date: string | Date, options: Intl.DateTimeFormatOptions = {}): string => {
+export const formatIST = (
+  date: string | Date,
+  options: Intl.DateTimeFormatOptions = {}
+): string => {
   const d = typeof date === "string" ? new Date(date) : date;
   return new Intl.DateTimeFormat("en-IN", {
     timeZone: "Asia/Kolkata",
@@ -36,7 +39,7 @@ export const toISTString = (date: Date = new Date()): string => {
     hour12: false,
   }).formatToParts(date);
 
-  const get = (type: string) => parts.find(p => p.type === type)?.value ?? "00";
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
   return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}:${get("second")}+05:30`;
 };
 
@@ -62,16 +65,26 @@ export const toISTDatePart = (date: string | Date | null | undefined): string =>
 };
 
 export const startOfMonthIST = (date?: Date): string => {
-  const todayStr = date 
-    ? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(date)
+  const todayStr = date
+    ? new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(date)
     : todayIST();
   const [y, m] = todayStr.split("-");
   return `${y}-${m}-01`;
 };
 
 export const endOfMonthIST = (date?: Date): string => {
-  const todayStr = date 
-    ? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(date)
+  const todayStr = date
+    ? new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(date)
     : todayIST();
   const [y, m] = todayStr.split("-");
   const lastDay = new Date(Number(y), Number(m), 0).getDate();
@@ -82,6 +95,21 @@ export const parseISTDate = (dateStr: string): Date => {
   // Assuming dateStr is YYYY-MM-DD
   const [y, m, d] = dateStr.split("-").map(Number);
   return new Date(y, m - 1, d);
+};
+
+/**
+ * Convert a naive datetime-local input value ("YYYY-MM-DDTHH:mm[:ss]") into an
+ * ISO 8601 string with an explicit +05:30 offset.
+ *
+ * WHY: transaction_list.date_completed is a timestamptz column — Postgres reads a
+ * bare "YYYY-MM-DDTHH:mm" as UTC, so an IST evening delivery got displayed as the
+ * NEXT day (+5:30 shift). PHP saved the picked wall-clock time as-is; this mirrors
+ * that by stamping it with the shop timezone explicitly.
+ */
+export const dtLocalToIST = (v: string): string => {
+  if (!v) return "";
+  if (/([zZ]|[+-]\d{2}:?\d{2})$/.test(v)) return v; // already has an offset
+  return v.length === 16 ? `${v}:00+05:30` : `${v}+05:30`;
 };
 
 /**
@@ -96,7 +124,7 @@ export const nowISTTime = (): string => {
     second: "2-digit",
     hour12: false,
   }).formatToParts(new Date());
-  const get = (type: string) => parts.find(p => p.type === type)?.value ?? "00";
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
   return `${get("hour")}:${get("minute")}:${get("second")}`;
 };
 
@@ -133,7 +161,10 @@ export const hoursBetweenIST = (timeIn: string | null, timeOut: string | null): 
  *  - Both, >= 6h      -> Present
  * Mirrors PHP save_attendance() / save_check_in_out() (21,600s threshold).
  */
-export const deriveStatusFromTimes = (timeIn: string | null, timeOut: string | null): 1 | 3 | null => {
+export const deriveStatusFromTimes = (
+  timeIn: string | null,
+  timeOut: string | null
+): 1 | 3 | null => {
   if (!timeIn) return null;
   if (!timeOut) return 1;
   const mins = minsBetweenIST(timeIn, timeOut);

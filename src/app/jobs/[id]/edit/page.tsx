@@ -1,14 +1,34 @@
 "use client";
 import { useState, useEffect, use, useRef, useCallback } from "react";
-import { supabase } from "@/lib/supabase";
+import { supabase, getCachedUser } from "@/lib/supabase";
+import { safeBack } from "@/lib/utils";
 import { useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import {
-  Save, ArrowLeft, Search, Check, ChevronDown, Loader2,
-  Wrench, Package, Hash, User, AlertCircle, CheckCircle2,
-  Trash2, Plus, IndianRupee, MapPin, MessageSquare, UserCog,
-  Smartphone, X,
+  Save,
+  ArrowLeft,
+  Loader2,
+  Wrench,
+  Package,
+  Hash,
+  User,
+  AlertCircle,
+  CheckCircle2,
+  Trash2,
+  IndianRupee,
+  MapPin,
+  MessageSquare,
+  UserCog,
+  Smartphone,
+  X,
+  Briefcase,
+  Plus,
 } from "lucide-react";
+import PageLoader from "@/components/PageLoader";
+import SearchableSelect from "@/components/SearchableSelect";
+import JobSpotPicker from "@/components/JobSpotPicker";
+import { getNextJobId, bumpJobCounter } from "@/lib/jobIdCounter";
+import { fetchClientDue, dueLabel } from "@/lib/client-due";
+import { logger } from "@/lib/logger";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // STYLES
@@ -21,37 +41,45 @@ const inputCls =
 const labelCls =
   "flex items-center gap-1.5 text-[10px] font-black uppercase tracking-[0.18em] text-slate-500 mb-1.5";
 
-const inr = (n: number) =>
-  "₹" + (n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 });
+const inr = (n: number) => "₹" + (n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2 });
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────────────────────
-type Client   = { id: number; firstname: string; middlename: string; lastname: string; contact: string; fullname: string };
+type Client = {
+  id: number;
+  firstname: string;
+  middlename: string;
+  lastname: string;
+  contact: string;
+  fullname: string;
+};
 type Mechanic = { id: number; fullname: string; commission_percent: number };
-type Service  = { id: number; name: string; price: number };
-type Product  = { id: number; name: string; price: number; available_stock: number };
+type Service = { id: number; name: string; price: number };
+type Product = { id: number; name: string; price: number; available_stock: number };
 
-type ServiceRow  = { tempId: number; service_id: number; service_name: string; price: number };
-type ProductRow  = { tempId: number; product_id: number; product_name: string; qty: number; price: number };
+type ServiceRow = { tempId: number; service_id: number; service_name: string; price: number };
+type ProductRow = {
+  tempId: number;
+  product_id: number | null; // null = custom spare (inventory se alag)
+  product_name: string;
+  qty: number;
+  price: number;
+};
 
 type Toast = { type: "success" | "error"; msg: string };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
-export default function ManageJobPage({
-  params,
-}: {
-  params: Promise<{ id?: string }>;
-}) {
+export default function ManageJobPage({ params }: { params: Promise<{ id?: string }> }) {
   const resolvedParams = use(params);
-  const router         = useRouter();
-  const searchParams   = useSearchParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   // jobId present → edit mode; else → new mode
-  const jobId    = resolvedParams.id ? parseInt(resolvedParams.id) : null;
-  const isEdit   = !!jobId && !isNaN(jobId);
+  const jobId = resolvedParams.id ? parseInt(resolvedParams.id) : null;
+  const isEdit = !!jobId && !isNaN(jobId);
 
   // ?client_id=123 → auto-select client (from view client page)
   const presetClientId = searchParams.get("client_id")
@@ -59,47 +87,58 @@ export default function ManageJobPage({
     : null;
 
   // ── STATE ─────────────────────────────────────────────────────────────
-  const [fetchLoading,   setFetchLoading]   = useState(isEdit);
-  const [saving,         setSaving]         = useState(false);
-  const [toast,          setToast]          = useState<Toast | null>(null);
-  const [currentUserId,  setCurrentUserId]  = useState<number>(0); // numeric user id from profiles
+  const [fetchLoading, setFetchLoading] = useState(isEdit);
+  const [saving, setSaving] = useState(false);
+  // Re-entrancy guard — double click / Enter double submit par duplicate row
+  // nahi banegaa (handleSave in-flight ho to doosra call ignore hota hai).
+  const savingRef = useRef(false);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<number>(0); // numeric user id from profiles
 
   // Master data
-  const [clients,   setClients]   = useState<Client[]>([]);
+  const [clients, setClients] = useState<Client[]>([]);
   const [mechanics, setMechanics] = useState<Mechanic[]>([]);
-  const [services,  setServices]  = useState<Service[]>([]);
-  const [products,  setProducts]  = useState<Product[]>([]);
+  const [services, setServices] = useState<Service[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
 
   // Form fields
-  const [selectedClient,   setSelectedClient]   = useState<Client | null>(null);
-  const [clientBalance,    setClientBalance]     = useState<{ amount: number; label: string; type: "due"|"advance"|"settled" } | null>(null);
-  const [selectedMechanic, setSelectedMechanic]  = useState<string>("");
-  const [jobCode,          setJobCode]           = useState<string>("");  // job_id column
-  const [txnCode,          setTxnCode]           = useState<string>("");  // code column (YYYYMMDD+seq)
-  const [item,             setItem]              = useState("");
-  const [fault,            setFault]             = useState("");
-  const [uniqId,           setUniqId]            = useState("");
-  const [remark,           setRemark]            = useState("");
-  const [serviceRows,      setServiceRows]       = useState<ServiceRow[]>([]);
-  const [productRows,      setProductRows]       = useState<ProductRow[]>([]);
-  const [commissionAmt,    setCommissionAmt]     = useState<string>("0");
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
+  const [clientBalance, setClientBalance] = useState<{
+    amount: number;
+    label: string;
+    type: "due" | "advance" | "settled";
+  } | null>(null);
+  const [selectedMechanic, setSelectedMechanic] = useState<string>("");
+  const [userRole, setUserRole] = useState<string>("staff");
+  const [jobCode, setJobCode] = useState<string>(""); // job_id column
+  const [txnCode, setTxnCode] = useState<string>(""); // code column (YYYYMMDD+seq)
+  const [item, setItem] = useState("");
+  const [fault, setFault] = useState("");
+  const [uniqId, setUniqId] = useState(""); // legacy free-text (bina location_id wale rows ka fallback)
+  const [locId, setLocId] = useState<number | null>(null); // locations.id (kind='job')
+  const [locName, setLocName] = useState(""); // selected spot ka naam (dual-write → uniq_id)
+  const [remark, setRemark] = useState("");
+  const [serviceRows, setServiceRows] = useState<ServiceRow[]>([]);
+  const [productRows, setProductRows] = useState<ProductRow[]>([]);
+  const [commissionAmt, setCommissionAmt] = useState<string>("0");
   const tempIdRef = useRef(0);
 
-  // Client search dropdown
-  const [clientOpen,   setClientOpen]   = useState(false);
-  const [clientSearch, setClientSearch] = useState("");
-  const clientDropRef = useRef<HTMLDivElement>(null);
+  // Custom (non-inventory) spare
+  const [showCustom, setShowCustom] = useState(false);
+  const [customName, setCustomName] = useState("");
+  const [customPrice, setCustomPrice] = useState("");
 
   // Add New Client Modal
   const [showAddClientModal, setShowAddClientModal] = useState(false);
   const [newClientForm, setNewClientForm] = useState({
-    firstname: "", middlename: "", lastname: "", contact: "", email: "", address: ""
+    firstname: "",
+    middlename: "",
+    lastname: "",
+    contact: "",
+    email: "",
+    address: "",
   });
   const [savingClient, setSavingClient] = useState(false);
-
-  // Service / Product add selectors
-  const [selService, setSelService] = useState("");
-  const [selProduct, setSelProduct] = useState("");
 
   // ── TOAST auto-dismiss ─────────────────────────────────────────────────
   useEffect(() => {
@@ -108,34 +147,10 @@ export default function ManageJobPage({
     return () => clearTimeout(t);
   }, [toast]);
 
-  // ── Click outside to close client dropdown ──────────────────────────
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (clientDropRef.current && !clientDropRef.current.contains(e.target as Node))
-        setClientOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
-
   // ── CLIENT BALANCE ────────────────────────────────────────────────────
   const fetchClientBalance = useCallback(async (cid: number) => {
-    const [{ data: txns }, { data: sales }, { data: pays }] = await Promise.all([
-      supabase.from("transaction_list").select("amount").eq("client_name", String(cid)),
-      supabase.from("direct_sales").select("total_amount").eq("client_id", cid),
-      supabase.from("client_payments").select("amount, discount").eq("client_id", cid).is("loan_id", null),
-    ]);
-    const { data: cd } = await supabase.from("client_list").select("opening_balance").eq("id", cid).single();
-    const ob  = cd?.opening_balance || 0;
-    const dr  = (txns  || []).reduce((s, r) => s + (r.amount || 0), 0)
-              + (sales || []).reduce((s, r) => s + (r.total_amount || 0), 0);
-    const cr  = (pays  || []).reduce((s, p) => s + (p.amount || 0) + (p.discount || 0), 0);
-    const bal = ob + dr - cr;
-    setClientBalance(
-      bal > 0.005  ? { amount: bal, label: "Due",     type: "due"      } :
-      bal < -0.005 ? { amount: Math.abs(bal), label: "Advance", type: "advance"  } :
-                     { amount: 0,   label: "Settled",  type: "settled"  }
-    );
+    const d = await fetchClientDue(supabase, cid);
+    setClientBalance(dueLabel(d.netBalance));
   }, []);
 
   // ── FETCH MASTER DATA ─────────────────────────────────────────────────
@@ -143,18 +158,23 @@ export default function ManageJobPage({
     const loadMaster = async () => {
       // Current logged-in user's numeric ID (from profiles → maps to transaction_list.user_id)
       try {
-        const { data: { user } } = await supabase.auth.getUser();
+        const {
+          data: { user },
+        } = await getCachedUser();
         if (user) {
           // profiles.mechanic_id is the numeric id used in transaction_list.user_id
           // Fall back to 0 if profile not found (will still error if DB enforces NOT NULL)
           const { data: profile } = await supabase
             .from("profiles")
-            .select("mechanic_id")
+            .select("mechanic_id, role")
             .eq("id", user.id)
             .single();
           setCurrentUserId(profile?.mechanic_id ?? 0);
+          setUserRole(profile?.role ?? "staff");
         }
-      } catch { /* silently ignore — user_id will be 0 */ }
+      } catch {
+        /* silently ignore — user_id will be 0 */
+      }
 
       // Clients
       const { data: cData } = await supabase
@@ -162,7 +182,7 @@ export default function ManageJobPage({
         .select("id, firstname, middlename, lastname, contact")
         .eq("delete_flag", 0)
         .order("firstname");
-      const mapped: Client[] = (cData || []).map(c => ({
+      const mapped: Client[] = (cData || []).map((c) => ({
         ...c,
         fullname: [c.firstname, c.middlename, c.lastname].filter(Boolean).join(" "),
       }));
@@ -170,7 +190,7 @@ export default function ManageJobPage({
 
       // Auto-select client from ?client_id param
       if (presetClientId && !isEdit) {
-        const found = mapped.find(c => c.id === presetClientId);
+        const found = mapped.find((c) => c.id === presetClientId);
         if (found) {
           setSelectedClient(found);
           fetchClientBalance(found.id);
@@ -181,82 +201,77 @@ export default function ManageJobPage({
       const { data: mData } = await supabase
         .from("mechanic_list")
         .select("id, firstname, middlename, lastname, commission_percent")
-        .eq("delete_flag", 0).eq("status", 1)
+        .eq("delete_flag", 0)
+        .eq("status", 1)
         .order("firstname");
-      setMechanics((mData || []).map(m => ({
-        id: m.id,
-        fullname: [m.firstname, m.middlename, m.lastname].filter(Boolean).join(" "),
-        commission_percent: m.commission_percent || 0,
-      })));
+      setMechanics(
+        (mData || []).map((m) => ({
+          id: m.id,
+          fullname: [m.firstname, m.middlename, m.lastname].filter(Boolean).join(" "),
+          commission_percent: m.commission_percent || 0,
+        }))
+      );
 
       // Services
       const { data: sData } = await supabase
         .from("service_list")
         .select("id, name, price")
-        .eq("delete_flag", 0).eq("status", 1)
+        .eq("delete_flag", 0)
+        .eq("status", 1)
         .order("name");
       setServices(sData || []);
 
       // Products with available stock — 3 separate queries.
       // Nested join product_list→transaction_products→transaction_list fails in PostgREST
       // because transaction_products has no single-column PK (composite key only).
-      const [
-        { data: pData },
-        { data: invData },
-        { data: tpData },
-        { data: dsiData },
-      ] = await Promise.all([
-        // 1. All active products
-        supabase
-          .from("product_list")
-          .select("id, name, price")
-          .eq("delete_flag", 0).eq("status", 1)
-          .order("name"),
+      const [{ data: pData }, { data: invData }, { data: tpData }, { data: dsiData }] =
+        await Promise.all([
+          // 1. All active products
+          supabase
+            .from("product_list")
+            .select("id, name, price")
+            .eq("delete_flag", 0)
+            .eq("status", 1)
+            .order("name"),
 
-        // 2. Total stock in (sum per product from inventory)
-        supabase
-          .from("inventory_list")
-          .select("product_id, quantity"),
+          // 2. Total stock in (sum per product from inventory)
+          supabase.from("inventory_list").select("product_id, quantity"),
 
-        // 3. Qty sold in non-cancelled jobs only
-        supabase
-          .from("transaction_products")
-          .select("product_id, qty, transaction_id"),
+          // 3. Qty sold in non-cancelled jobs only
+          supabase.from("transaction_products").select("product_id, qty, transaction_id"),
 
-        // 4. Qty sold in direct sales
-        supabase
-          .from("direct_sale_items")
-          .select("product_id, qty"),
-      ]);
+          // 4. Qty sold in direct sales
+          supabase.from("direct_sale_items").select("product_id, qty"),
+        ]);
 
       // Get cancelled job IDs to exclude from sold count
       const { data: cancelledJobs } = await supabase
         .from("transaction_list")
         .select("id")
         .eq("status", 4);
-      const cancelledIds = new Set((cancelledJobs || []).map(j => j.id));
+      const cancelledIds = new Set((cancelledJobs || []).map((j) => j.id));
 
       // Build lookup maps
       const invMap: Record<number, number> = {};
-      (invData || []).forEach(r => {
+      (invData || []).forEach((r) => {
         invMap[r.product_id] = (invMap[r.product_id] || 0) + (r.quantity || 0);
       });
 
       const jobSoldMap: Record<number, number> = {};
-      (tpData || []).forEach(r => {
+      (tpData || []).forEach((r) => {
         if (!cancelledIds.has(r.transaction_id))
           jobSoldMap[r.product_id] = (jobSoldMap[r.product_id] || 0) + (r.qty || 0);
       });
 
       const saleSoldMap: Record<number, number> = {};
-      (dsiData || []).forEach(r => {
+      (dsiData || []).forEach((r) => {
         saleSoldMap[r.product_id] = (saleSoldMap[r.product_id] || 0) + (r.qty || 0);
       });
 
-      const withStock: Product[] = (pData || []).map(p => ({
-        id:              p.id,
-        name:            p.name,
-        price:           p.price,
+      const withStock: Product[] = (pData || []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        price: p.price,
         available_stock: (invMap[p.id] || 0) - (jobSoldMap[p.id] || 0) - (saleSoldMap[p.id] || 0),
       }));
       setProducts(withStock);
@@ -272,15 +287,18 @@ export default function ManageJobPage({
         const { data, error } = await supabase
           .from("transaction_list")
           .select("*")
-          .eq("id", jobId).single();
+          .eq("id", jobId)
+          .single();
         if (error) throw error;
 
         setJobCode(data.job_id ?? "");
-        setTxnCode(data.code  ?? "");
-        setItem(data.item     ?? "");
-        setFault(data.fault   ?? "");
+        setTxnCode(data.code ?? "");
+        setItem(data.item ?? "");
+        setFault(data.fault ?? "");
         setUniqId(data.uniq_id ?? "");
-        setRemark(data.remark  ?? "");
+        setLocId(data.location_id ?? null);
+        setLocName(data.location_id ? (data.uniq_id ?? "") : ""); // dual-write: naam = uniq_id
+        setRemark(data.remark ?? "");
         setCommissionAmt(String(data.mechanic_commission_amount ?? 0));
         setSelectedMechanic(data.mechanic_id != null ? String(data.mechanic_id) : "");
 
@@ -289,11 +307,14 @@ export default function ManageJobPage({
           const { data: cData } = await supabase
             .from("client_list")
             .select("id, firstname, middlename, lastname, contact")
-            .eq("id", parseInt(data.client_name)).single();
+            .eq("id", parseInt(data.client_name))
+            .single();
           if (cData) {
             const cl: Client = {
               ...cData,
-              fullname: [cData.firstname, cData.middlename, cData.lastname].filter(Boolean).join(" "),
+              fullname: [cData.firstname, cData.middlename, cData.lastname]
+                .filter(Boolean)
+                .join(" "),
             };
             setSelectedClient(cl);
             fetchClientBalance(cl.id);
@@ -305,28 +326,31 @@ export default function ManageJobPage({
           .from("transaction_services")
           .select("service_id, service_name, price")
           .eq("transaction_id", jobId);
-        setServiceRows((svcs || []).map(s => ({
-          tempId:       ++tempIdRef.current,
-          service_id:   s.service_id   ?? 0,
-          service_name: s.service_name ?? "",
-          price:        s.price        ?? 0,
-        })));
+        setServiceRows(
+          (svcs || []).map((s) => ({
+            tempId: ++tempIdRef.current,
+            service_id: s.service_id ?? 0,
+            service_name: s.service_name ?? "",
+            price: s.price ?? 0,
+          }))
+        );
 
         // Load products
         const { data: prods } = await supabase
           .from("transaction_products")
           .select("product_id, product_name, qty, price")
           .eq("transaction_id", jobId);
-        setProductRows((prods || []).map(p => ({
-          tempId:       ++tempIdRef.current,
-          product_id:   p.product_id   ?? 0,
-          product_name: p.product_name ?? "",
-          qty:          p.qty          ?? 1,
-          price:        p.price        ?? 0,
-        })));
-
+        setProductRows(
+          (prods || []).map((p) => ({
+            tempId: ++tempIdRef.current,
+            product_id: p.product_id ?? 0,
+            product_name: p.product_name ?? "",
+            qty: p.qty ?? 1,
+            price: p.price ?? 0,
+          }))
+        );
       } catch (e) {
-        console.error("load job:", e instanceof Error ? e.message : JSON.stringify(e));
+        logger.error("load job:", e instanceof Error ? e.message : JSON.stringify(e));
         setToast({ type: "error", msg: "Job load karne mein galti!" });
         router.push("/jobs");
       } finally {
@@ -339,9 +363,18 @@ export default function ManageJobPage({
   // ── ADD NEW CLIENT ─────────────────────────────────────────────────────
   const handleSaveNewClient = async () => {
     const { firstname, lastname, contact, address } = newClientForm;
-    if (!firstname.trim()) { setToast({ type: "error", msg: "First name zaroori hai!" }); return; }
-    if (!lastname.trim())  { setToast({ type: "error", msg: "Last name zaroori hai!" });  return; }
-    if (!contact.trim())   { setToast({ type: "error", msg: "Contact number zaroori hai!" }); return; }
+    if (!firstname.trim()) {
+      setToast({ type: "error", msg: "First name zaroori hai!" });
+      return;
+    }
+    if (!lastname.trim()) {
+      setToast({ type: "error", msg: "Last name zaroori hai!" });
+      return;
+    }
+    if (!contact.trim()) {
+      setToast({ type: "error", msg: "Contact number zaroori hai!" });
+      return;
+    }
 
     setSavingClient(true);
     try {
@@ -367,16 +400,25 @@ export default function ManageJobPage({
         fullname: [data.firstname, data.middlename, data.lastname].filter(Boolean).join(" "),
       };
 
-      setClients(prev => [...prev, newClient]);
+      setClients((prev) => [...prev, newClient]);
       setSelectedClient(newClient);
       fetchClientBalance(newClient.id);
       setShowAddClientModal(false);
-      setNewClientForm({ firstname: "", middlename: "", lastname: "", contact: "", email: "", address: "" });
+      setNewClientForm({
+        firstname: "",
+        middlename: "",
+        lastname: "",
+        contact: "",
+        email: "",
+        address: "",
+      });
       setToast({ type: "success", msg: "Naya client add ho gaya! ✅" });
-
     } catch (e) {
-      console.error("save client error:", e instanceof Error ? e.message : e);
-      setToast({ type: "error", msg: "Client save nahi hua: " + (e instanceof Error ? e.message : "Unknown error") });
+      logger.error("save client error:", e instanceof Error ? e.message : e);
+      setToast({
+        type: "error",
+        msg: "Client save nahi hua: " + (e instanceof Error ? e.message : "Unknown error"),
+      });
     } finally {
       setSavingClient(false);
     }
@@ -390,10 +432,15 @@ export default function ManageJobPage({
     const genCode = async () => {
       // IST today string
       const istParts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+        timeZone: "Asia/Kolkata",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
       }).formatToParts(new Date());
       const p: Record<string, string> = {};
-      istParts.forEach(x => { p[x.type] = x.value; });
+      istParts.forEach((x) => {
+        p[x.type] = x.value;
+      });
       const todayIST = `${p.year}-${p.month}-${p.day}`;
       const datePrefix = todayIST.replace(/-/g, ""); // "20251024"
 
@@ -404,127 +451,204 @@ export default function ManageJobPage({
         .gte("date_created", `${todayIST}T00:00:00+05:30`)
         .lte("date_created", `${todayIST}T23:59:59+05:30`);
       const dailySeq = String((todayCount || 0) + 1).padStart(2, "0");
-      setTxnCode(`${datePrefix}${dailySeq}`);  // e.g. "2025102401"
+      setTxnCode(`${datePrefix}${dailySeq}`); // e.g. "2025102401"
 
       // job_id = job_id_counter table se last_job_id + 1
-      // Single-row counter table (id=1) — DB ka authoritative source
-      const { data: counterRow } = await supabase
-        .from("job_id_counter")
-        .select("last_job_id")
-        .eq("id", 1)
-        .single();
-      const nextJobId = (counterRow?.last_job_id || 28101) + 1;
-      setJobCode(String(nextJobId));  // e.g. 28101 → "28102"
+      const nextJobId = await getNextJobId();
+      setJobCode(String(nextJobId));
     };
     genCode();
   }, [isEdit]);
 
   // ── ADD SERVICE ROW ───────────────────────────────────────────────────
-  const addService = () => {
-    if (!selService) return;
-    const svc = services.find(s => s.id === parseInt(selService));
+  const addService = (svcId: number) => {
+    const svc = services.find((s) => s.id === svcId);
     if (!svc) return;
-    if (serviceRows.some(r => r.service_id === svc.id)) {
+    if (serviceRows.some((r) => r.service_id === svc.id)) {
       setToast({ type: "error", msg: "Yeh service already add hai!" });
       return;
     }
-    setServiceRows(prev => [...prev, {
-      tempId: ++tempIdRef.current,
-      service_id: svc.id, service_name: svc.name, price: svc.price,
-    }]);
-    setSelService("");
+    setServiceRows((prev) => [
+      ...prev,
+      {
+        tempId: ++tempIdRef.current,
+        service_id: svc.id,
+        service_name: svc.name,
+        price: svc.price,
+      },
+    ]);
   };
 
   const removeService = (tempId: number) =>
-    setServiceRows(prev => prev.filter(r => r.tempId !== tempId));
+    setServiceRows((prev) => prev.filter((r) => r.tempId !== tempId));
 
   const updateServicePrice = (tempId: number, val: string) =>
-    setServiceRows(prev => prev.map(r => r.tempId === tempId ? { ...r, price: parseFloat(val) || 0 } : r));
+    setServiceRows((prev) =>
+      prev.map((r) => (r.tempId === tempId ? { ...r, price: parseFloat(val) || 0 } : r))
+    );
 
   const updateServiceName = (tempId: number, val: string) =>
-    setServiceRows(prev => prev.map(r => r.tempId === tempId ? { ...r, service_name: val } : r));
+    setServiceRows((prev) =>
+      prev.map((r) => (r.tempId === tempId ? { ...r, service_name: val } : r))
+    );
 
   // ── ADD PRODUCT ROW ───────────────────────────────────────────────────
-  const addProduct = () => {
-    if (!selProduct) return;
-    const prd = products.find(p => p.id === parseInt(selProduct));
+  const addProduct = (prdId: number) => {
+    const prd = products.find((p) => p.id === prdId);
     if (!prd) return;
-    if (productRows.some(r => r.product_id === prd.id)) {
+    if (productRows.some((r) => r.product_id === prd.id)) {
       setToast({ type: "error", msg: "Yeh product already add hai!" });
       return;
     }
-    setProductRows(prev => [...prev, {
-      tempId: ++tempIdRef.current,
-      product_id: prd.id, product_name: prd.name, qty: 1, price: prd.price,
-    }]);
-    setSelProduct("");
+    setProductRows((prev) => [
+      ...prev,
+      {
+        tempId: ++tempIdRef.current,
+        product_id: prd.id,
+        product_name: prd.name,
+        qty: 1,
+        price: prd.price,
+      },
+    ]);
+  };
+
+  // Custom spare (inventory me nahi hai) — product_id NULL, name/price free text.
+  // Stock math product_id se key karti hai → NULL row khud-ba-khud kabhi subtract nahi hota.
+  const addProductCustom = () => {
+    const nm = customName.trim();
+    if (!nm) {
+      setToast({ type: "error", msg: "Spare ka naam do!" });
+      return;
+    }
+    const price = parseFloat(customPrice) || 0;
+    setProductRows((prev) => [
+      ...prev,
+      {
+        tempId: ++tempIdRef.current,
+        product_id: null, // NOT NULL column → migration 20260905 se nullable
+        product_name: nm,
+        qty: 1,
+        price,
+      },
+    ]);
+    setCustomName("");
+    setCustomPrice("");
+    setShowCustom(false);
   };
 
   const removeProduct = (tempId: number) =>
-    setProductRows(prev => prev.filter(r => r.tempId !== tempId));
+    setProductRows((prev) => prev.filter((r) => r.tempId !== tempId));
 
   const updateProductQty = (tempId: number, val: string) => {
-    const prd    = productRows.find(r => r.tempId === tempId);
-    const stock  = products.find(p => p.id === prd?.product_id)?.available_stock ?? Infinity;
-    const newQty = Math.min(Math.max(1, parseInt(val) || 1), stock);
-    setProductRows(prev => prev.map(r => r.tempId === tempId ? { ...r, qty: newQty } : r));
+    // No stock cap — overselling allowed by design (negative inventory)
+    const newQty = Math.max(1, parseInt(val) || 1);
+    setProductRows((prev) => prev.map((r) => (r.tempId === tempId ? { ...r, qty: newQty } : r)));
   };
 
   const updateProductPrice = (tempId: number, val: string) =>
-    setProductRows(prev => prev.map(r => r.tempId === tempId ? { ...r, price: parseFloat(val) || 0 } : r));
+    setProductRows((prev) =>
+      prev.map((r) => (r.tempId === tempId ? { ...r, price: parseFloat(val) || 0 } : r))
+    );
 
   // ── TOTALS ─────────────────────────────────────────────────────────────
   const serviceTotal = serviceRows.reduce((s, r) => s + r.price, 0);
   const productTotal = productRows.reduce((s, r) => s + r.qty * r.price, 0);
-  const grandTotal   = serviceTotal + productTotal;
+  const grandTotal = serviceTotal + productTotal;
 
   // Auto-calculate mechanic commission when mechanic changes
+  // Rule: commission = services total ONLY (spare parts excluded) × DB rate
   useEffect(() => {
     if (!selectedMechanic) return;
-    const mech = mechanics.find(m => m.id === parseInt(selectedMechanic));
+    const mech = mechanics.find((m) => m.id === parseInt(selectedMechanic));
     if (mech && mech.commission_percent > 0) {
-      setCommissionAmt(((grandTotal * mech.commission_percent) / 100).toFixed(2));
+      setCommissionAmt(((serviceTotal * mech.commission_percent) / 100).toFixed(2));
     }
-  }, [selectedMechanic, grandTotal, mechanics]);
+  }, [selectedMechanic, serviceTotal, mechanics]);
 
   // ── SUBMIT ─────────────────────────────────────────────────────────────
   const handleSave = async () => {
-    if (!selectedClient) { setToast({ type: "error", msg: "Client select karo!" }); return; }
-    if (!item.trim())    { setToast({ type: "error", msg: "Item/Model zaroori hai!" }); return; }
-    if (!fault.trim())   { setToast({ type: "error", msg: "Fault description zaroori hai!" }); return; }
-    if (!selectedMechanic) { setToast({ type: "error", msg: "Mechanic select karo!" }); return; }
-
-    // Stock validation
-    for (const pr of productRows) {
-      const stock = products.find(p => p.id === pr.product_id)?.available_stock ?? 0;
-      if (!isEdit && pr.qty > stock) {
-        setToast({ type: "error", msg: `${pr.product_name}: stock (${stock}) se zyada qty nahi ho sakti!` });
-        return;
-      }
+    if (savingRef.current) return;
+    if (!selectedClient) {
+      setToast({ type: "error", msg: "Client select karo!" });
+      return;
+    }
+    if (!item.trim()) {
+      setToast({ type: "error", msg: "Item/Model zaroori hai!" });
+      return;
+    }
+    if (!fault.trim()) {
+      setToast({ type: "error", msg: "Fault description zaroori hai!" });
+      return;
+    }
+    if (!selectedMechanic) {
+      setToast({ type: "error", msg: "Mechanic select karo!" });
+      return;
     }
 
+    // NOTE: No hard stock validation — out-of-stock products can still be sold.
+    // Shortfall is shown as an amber warning in the product rows.
+
+    savingRef.current = true;
     setSaving(true);
     try {
+      // Auto-calculate commission for staff (they can't see/edit the input).
+      // Rule: services total ONLY × DB commission rate.
+      let finalCommission = parseFloat(commissionAmt) || 0;
+      if (userRole !== "admin" && userRole !== "developer" && selectedMechanic) {
+        const svcTotal = serviceRows.reduce((s, r) => s + r.price, 0);
+        const mech = mechanics.find((m) => m.id === parseInt(selectedMechanic));
+        if (mech && mech.commission_percent > 0) {
+          finalCommission = Math.round((svcTotal * mech.commission_percent) / 100);
+        }
+      }
+
       const payload = {
         // user_id = logged-in user's numeric id (profiles.mechanic_id → old PHP users.id)
-        user_id:                    currentUserId,
-        client_name:                String(selectedClient.id),
-        mechanic_id:                parseInt(selectedMechanic),
-        code:                       txnCode,   // YYYYMMDD+seq e.g. "2025102401"
-        job_id:                     jobCode,   // global seq e.g. "27270
-        item:                       item.trim(),
-        fault:                      fault.trim(),
-        uniq_id:                    uniqId.trim() || "",   // NOT NULL in DB — empty string safe
-        remark:                     remark.trim() || "",   // NOT NULL in DB — empty string safe
-        amount:                     grandTotal,
-        mechanic_commission_amount: parseFloat(commissionAmt) || 0,
-        status:                     0,  // Pending
-        date_updated:               new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).formatToParts(new Date()).reduce((o, p) => ({ ...o, [p.type]: p.value }), {} as Record<string, string>) && (() => { const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).formatToParts(new Date()); const g = (t: string) => p.find(x => x.type === t)?.value ?? "00"; return `${g("year")}-${g("month")}-${g("day")}T${g("hour")}:${g("minute")}:${g("second")}+05:30`; })(),
+        user_id: currentUserId,
+        client_name: String(selectedClient.id),
+        mechanic_id: parseInt(selectedMechanic),
+        code: txnCode, // YYYYMMDD+seq e.g. "2025102401"
+        job_id: jobCode, // global seq e.g. "27270
+        item: item.trim(),
+        fault: fault.trim(),
+        uniq_id: (locId ? locName : uniqId).trim() || "", // dual-write: location ho to spot naam, warna legacy text
+        location_id: locId,
+        remark: remark.trim() || "", // NOT NULL in DB — empty string safe
+        amount: grandTotal,
+        mechanic_commission_amount: finalCommission,
+        date_updated:
+          new Intl.DateTimeFormat("en-CA", {
+            timeZone: "Asia/Kolkata",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          })
+            .formatToParts(new Date())
+            .reduce((o, p) => ({ ...o, [p.type]: p.value }), {} as Record<string, string>) &&
+          (() => {
+            const p = new Intl.DateTimeFormat("en-CA", {
+              timeZone: "Asia/Kolkata",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+              hour12: false,
+            }).formatToParts(new Date());
+            const g = (t: string) => p.find((x) => x.type === t)?.value ?? "00";
+            return `${g("year")}-${g("month")}-${g("day")}T${g("hour")}:${g("minute")}:${g("second")}+05:30`;
+          })(),
       };
 
       let txnId = jobId;
 
       if (isEdit) {
+        // Edit me status kabhi touch mat karo — existing status waisa hi rahe
         const { error } = await supabase
           .from("transaction_list")
           .update(payload)
@@ -539,8 +663,29 @@ export default function ManageJobPage({
       } else {
         const { data, error } = await supabase
           .from("transaction_list")
-          .insert([{ ...payload, del_status: 0, date_created: (() => { const p = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).formatToParts(new Date()); const g = (t: string) => p.find(x => x.type === t)?.value ?? "00"; return `${g("year")}-${g("month")}-${g("day")}T${g("hour")}:${g("minute")}:${g("second")}+05:30`; })() }])
-          .select("id").single();
+          .insert([
+            {
+              ...payload,
+              status: 0, // Pending — sirf naye job par
+              del_status: 0,
+              date_created: (() => {
+                const p = new Intl.DateTimeFormat("en-CA", {
+                  timeZone: "Asia/Kolkata",
+                  year: "numeric",
+                  month: "2-digit",
+                  day: "2-digit",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                  hour12: false,
+                }).formatToParts(new Date());
+                const g = (t: string) => p.find((x) => x.type === t)?.value ?? "00";
+                return `${g("year")}-${g("month")}-${g("day")}T${g("hour")}:${g("minute")}:${g("second")}+05:30`;
+              })(),
+            },
+          ])
+          .select("id")
+          .single();
         if (error) throw error;
         txnId = data.id;
       }
@@ -548,11 +693,11 @@ export default function ManageJobPage({
       // Insert services
       if (serviceRows.length > 0) {
         const { error } = await supabase.from("transaction_services").insert(
-          serviceRows.map(r => ({
+          serviceRows.map((r) => ({
             transaction_id: txnId,
-            service_id:     r.service_id,
-            service_name:   r.service_name,
-            price:          r.price,
+            service_id: r.service_id,
+            service_name: r.service_name,
+            price: r.price,
           }))
         );
         if (error) throw error;
@@ -561,12 +706,12 @@ export default function ManageJobPage({
       // Insert products
       if (productRows.length > 0) {
         const { error } = await supabase.from("transaction_products").insert(
-          productRows.map(r => ({
+          productRows.map((r) => ({
             transaction_id: txnId,
-            product_id:     r.product_id,
-            product_name:   r.product_name,
-            qty:            r.qty,
-            price:          r.price,
+            product_id: r.product_id,
+            product_name: r.product_name,
+            qty: r.qty,
+            price: r.price,
           }))
         );
         if (error) throw error;
@@ -574,52 +719,42 @@ export default function ManageJobPage({
 
       // Increment job_id_counter after successful save (new job only)
       if (!isEdit) {
-        await supabase
-          .from("job_id_counter")
-          .update({ last_job_id: parseInt(jobCode) })
-          .eq("id", 1);
+        await bumpJobCounter(parseInt(jobCode));
       }
 
-      setToast({ type: "success", msg: isEdit ? "Job update ho gaya! ✅" : "Naya job create ho gaya! ✅" });
-      setTimeout(() => router.push(`/jobs/${txnId}/view`), 1000);
-
+      setToast({
+        type: "success",
+        msg: isEdit ? "Job update ho gaya! ✅" : "Naya job create ho gaya! ✅",
+      });
+      setTimeout(() => router.replace(`/jobs/${txnId}/view`), 1000);
     } catch (e) {
-      console.error("save error:", e instanceof Error ? e.message : JSON.stringify(e));
+      logger.error("save error:", e instanceof Error ? e.message : JSON.stringify(e));
       setToast({ type: "error", msg: e instanceof Error ? e.message : "Save karne mein galti!" });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
 
-  // ── FILTERED CLIENTS ───────────────────────────────────────────────────
-  const filteredClients = clients.filter(c =>
-    c.fullname.toLowerCase().includes(clientSearch.toLowerCase()) ||
-    c.contact.includes(clientSearch)
-  );
-
   // ─────────────────────────────────────────────────────────────────────────
   // LOADING STATE
   // ─────────────────────────────────────────────────────────────────────────
-  if (fetchLoading) return (
-    <div className="min-h-[80vh] flex flex-col items-center justify-center gap-4 bg-[#0d1117]">
-      <Loader2 className="animate-spin text-blue-500" size={40} />
-      <p className="text-slate-600 text-[10px] font-black uppercase tracking-[0.3em]">Loading Job…</p>
-    </div>
-  );
+  if (fetchLoading) return <PageLoader icon={Briefcase} label="loading job..." tone="blue" />;
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-[#0d1117] text-white font-sans">
-
       {/* Toast */}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl border text-sm font-bold transition-all ${
-          toast.type === "success"
-            ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
-            : "bg-red-500/15 border-red-500/30 text-red-400"
-        }`}>
+        <div
+          className={`fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl border text-sm font-bold transition-all ${
+            toast.type === "success"
+              ? "bg-emerald-500/15 border-emerald-500/30 text-emerald-400"
+              : "bg-red-500/15 border-red-500/30 text-red-400"
+          }`}
+        >
           {toast.type === "success" ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
           {toast.msg}
         </div>
@@ -652,11 +787,13 @@ export default function ManageJobPage({
             <div className="p-5 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className={labelCls}>First Name <span className="text-red-400">*</span></label>
+                  <label className={labelCls}>
+                    First Name <span className="text-red-400">*</span>
+                  </label>
                   <input
                     type="text"
                     value={newClientForm.firstname}
-                    onChange={e => setNewClientForm(p => ({ ...p, firstname: e.target.value }))}
+                    onChange={(e) => setNewClientForm((p) => ({ ...p, firstname: e.target.value }))}
                     placeholder="Vikram"
                     className={inputCls}
                   />
@@ -666,28 +803,34 @@ export default function ManageJobPage({
                   <input
                     type="text"
                     value={newClientForm.middlename}
-                    onChange={e => setNewClientForm(p => ({ ...p, middlename: e.target.value }))}
+                    onChange={(e) =>
+                      setNewClientForm((p) => ({ ...p, middlename: e.target.value }))
+                    }
                     placeholder="Jain"
                     className={inputCls}
                   />
                 </div>
               </div>
               <div>
-                <label className={labelCls}>Last Name <span className="text-red-400">*</span></label>
+                <label className={labelCls}>
+                  Last Name <span className="text-red-400">*</span>
+                </label>
                 <input
                   type="text"
                   value={newClientForm.lastname}
-                  onChange={e => setNewClientForm(p => ({ ...p, lastname: e.target.value }))}
+                  onChange={(e) => setNewClientForm((p) => ({ ...p, lastname: e.target.value }))}
                   placeholder="Jain"
                   className={inputCls}
                 />
               </div>
               <div>
-                <label className={labelCls}>Contact Number <span className="text-red-400">*</span></label>
+                <label className={labelCls}>
+                  Contact Number <span className="text-red-400">*</span>
+                </label>
                 <input
                   type="tel"
                   value={newClientForm.contact}
-                  onChange={e => setNewClientForm(p => ({ ...p, contact: e.target.value }))}
+                  onChange={(e) => setNewClientForm((p) => ({ ...p, contact: e.target.value }))}
                   placeholder="9876543210"
                   className={inputCls}
                 />
@@ -697,7 +840,7 @@ export default function ManageJobPage({
                 <input
                   type="email"
                   value={newClientForm.email}
-                  onChange={e => setNewClientForm(p => ({ ...p, email: e.target.value }))}
+                  onChange={(e) => setNewClientForm((p) => ({ ...p, email: e.target.value }))}
                   placeholder="client@email.com"
                   className={inputCls}
                 />
@@ -706,7 +849,7 @@ export default function ManageJobPage({
                 <label className={labelCls}>Address</label>
                 <textarea
                   value={newClientForm.address}
-                  onChange={e => setNewClientForm(p => ({ ...p, address: e.target.value }))}
+                  onChange={(e) => setNewClientForm((p) => ({ ...p, address: e.target.value }))}
                   placeholder="Customer address..."
                   rows={2}
                   className={`${inputCls} resize-none`}
@@ -721,7 +864,17 @@ export default function ManageJobPage({
                 disabled={savingClient}
                 className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 disabled:opacity-50 text-white rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all"
               >
-                {savingClient ? <><Loader2 size={16} className="animate-spin" />Saving…</> : <><CheckCircle2 size={16} />Save Client</>}
+                {savingClient ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 size={16} />
+                    Save Client
+                  </>
+                )}
               </button>
               <button
                 onClick={() => setShowAddClientModal(false)}
@@ -735,25 +888,31 @@ export default function ManageJobPage({
       )}
 
       <div className="max-w-5xl mx-auto p-4 md:p-6 space-y-4">
-
         {/* ── PAGE HEADER ─────────────────────────────────────────────── */}
         <div className="relative overflow-hidden bg-[#161b27] rounded-3xl border border-[#21293d] p-5">
-          <div className="absolute inset-0 opacity-[0.025]"
-            style={{ backgroundImage: "radial-gradient(circle,#fff 1px,transparent 1px)", backgroundSize: "24px 24px" }} />
+          <div
+            className="absolute inset-0 opacity-[0.025]"
+            style={{
+              backgroundImage: "radial-gradient(circle,#fff 1px,transparent 1px)",
+              backgroundSize: "24px 24px",
+            }}
+          />
           <div className="absolute -top-12 -right-12 w-48 h-48 bg-blue-600/8 rounded-full blur-3xl pointer-events-none" />
           <div className="relative flex items-center gap-4">
-            <Link
-              href={isEdit ? `/jobs/${jobId}/view` : "/jobs"}
+            <button
+              onClick={() => safeBack(router, "/jobs")}
               className="w-10 h-10 flex items-center justify-center bg-[#111520] border border-[#21293d] hover:border-slate-500 rounded-xl text-slate-500 hover:text-white transition-all flex-shrink-0"
             >
               <ArrowLeft size={17} />
-            </Link>
+            </button>
             <div className="flex items-center gap-3 flex-1 min-w-0">
-              <div className={`w-11 h-11 rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 ${
-                isEdit
-                  ? "bg-gradient-to-br from-amber-500 to-amber-700 shadow-amber-900/40"
-                  : "bg-gradient-to-br from-blue-500 to-blue-700 shadow-blue-900/40"
-              }`}>
+              <div
+                className={`w-11 h-11 rounded-xl flex items-center justify-center shadow-lg flex-shrink-0 ${
+                  isEdit
+                    ? "bg-gradient-to-br from-amber-500 to-amber-700 shadow-amber-900/40"
+                    : "bg-gradient-to-br from-blue-500 to-blue-700 shadow-blue-900/40"
+                }`}
+              >
                 <Wrench className="text-white" size={20} />
               </div>
               <div className="min-w-0">
@@ -781,11 +940,13 @@ export default function ManageJobPage({
             1. Client & Assignment
           </p>
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
-
             {/* Client dropdown — col 6 */}
-            <div className="md:col-span-6 relative" ref={clientDropRef}>
+            <div className="md:col-span-6">
               <div className="flex items-center gap-2 mb-1.5">
-                <label className={labelCls}><User size={13} className="text-blue-400" />Client <span className="text-red-400">*</span></label>
+                <label className={labelCls}>
+                  <User size={13} className="text-blue-400" />
+                  Client <span className="text-red-400">*</span>
+                </label>
                 <button
                   type="button"
                   onClick={() => setShowAddClientModal(true)}
@@ -794,101 +955,78 @@ export default function ManageJobPage({
                   + Add New Client
                 </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setClientOpen(v => !v)}
-                className={`w-full flex items-center justify-between px-3 py-2.5 bg-[#111520] border rounded-xl text-sm transition-all outline-none text-left ${
-                  clientOpen ? "border-blue-500/60 ring-1 ring-blue-500/20" : "border-[#21293d] hover:border-slate-600"
-                }`}
-              >
-                {selectedClient ? (
+              <SearchableSelect
+                value={selectedClient?.id ?? null}
+                options={clients.map((c) => ({ id: c.id, label: c.fullname, sub: c.contact }))}
+                onSelect={(id) => {
+                  const c = clients.find((x) => String(x.id) === id);
+                  if (c) {
+                    setSelectedClient(c);
+                    fetchClientBalance(c.id);
+                  }
+                }}
+                placeholder="Search client (name/contact)…"
+                searchPlaceholder="Name ya contact se search karo…"
+                emptyText="Koi client nahi mila"
+                renderSelected={(opt) => (
                   <div>
-                    <div className="font-bold text-white text-sm">{selectedClient.fullname}</div>
-                    <div className="text-blue-400 text-xs">{selectedClient.contact}</div>
+                    <div className="font-bold text-white text-sm">{opt.label}</div>
+                    <div className="text-blue-400 text-xs">{opt.sub}</div>
                   </div>
-                ) : (
-                  <span className="text-slate-600 font-medium">Search client (name/contact)…</span>
                 )}
-                <ChevronDown size={16} className="text-slate-500 flex-shrink-0" />
-              </button>
+              />
 
               {/* Client balance chip */}
               {clientBalance && (
-                <div className={`mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-black border ${
-                  clientBalance.type === "due"
-                    ? "bg-red-500/10 border-red-500/20 text-red-400"
-                    : clientBalance.type === "advance"
-                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
-                    : "bg-slate-500/10 border-slate-500/20 text-slate-500"
-                }`}>
+                <div
+                  className={`mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-black border ${
+                    clientBalance.type === "due"
+                      ? "bg-red-500/10 border-red-500/20 text-red-400"
+                      : clientBalance.type === "advance"
+                        ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+                        : "bg-slate-500/10 border-slate-500/20 text-slate-500"
+                  }`}
+                >
                   <IndianRupee size={10} />
                   {clientBalance.label}: {inr(clientBalance.amount)}
-                </div>
-              )}
-
-              {/* Dropdown */}
-              {clientOpen && (
-                <div className="absolute top-full left-0 right-0 mt-2 bg-[#161b27] border border-[#21293d] rounded-2xl shadow-2xl z-50 p-3">
-                  <div className="relative mb-2">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600" size={15} />
-                    <input
-                      autoFocus
-                      placeholder="Name ya contact se search karo…"
-                      className="w-full pl-9 pr-3 py-2.5 bg-[#111520] border border-[#21293d] rounded-xl text-white text-sm outline-none focus:border-blue-500/60 placeholder:text-slate-700"
-                      value={clientSearch}
-                      onChange={e => setClientSearch(e.target.value)}
-                    />
-                  </div>
-                  <div className="max-h-52 overflow-y-auto space-y-0.5">
-                    {filteredClients.length === 0 ? (
-                      <p className="text-slate-600 text-xs text-center py-4">Koi client nahi mila</p>
-                    ) : filteredClients.map(c => (
-                      <div
-                        key={c.id}
-                        onClick={() => {
-                          setSelectedClient(c);
-                          fetchClientBalance(c.id);
-                          setClientOpen(false);
-                          setClientSearch("");
-                        }}
-                        className="flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-white/5 cursor-pointer transition-all group"
-                      >
-                        <div>
-                          <div className="text-sm font-bold text-white group-hover:text-blue-300 transition-colors">{c.fullname}</div>
-                          <div className="text-xs text-slate-600">{c.contact}</div>
-                        </div>
-                        {selectedClient?.id === c.id && <Check size={15} className="text-emerald-400 flex-shrink-0" />}
-                      </div>
-                    ))}
-                  </div>
                 </div>
               )}
             </div>
 
             {/* Job Code — col 2 */}
             <div className="md:col-span-2">
-              <label className={labelCls}><Hash size={13} className="text-slate-600" />Job No.</label>
+              <label className={labelCls}>
+                <Hash size={13} className="text-slate-600" />
+                Job No.
+              </label>
               <input
-                value={jobCode} readOnly
+                value={jobCode}
+                readOnly
                 className={`${inputCls} opacity-60 cursor-not-allowed font-mono text-xs`}
               />
             </div>
 
             {/* Mechanic — col 4 */}
             <div className="md:col-span-4">
-              <label className={labelCls}><UserCog size={13} className="text-purple-400" />Mechanic <span className="text-red-400">*</span></label>
-              <select
-                value={selectedMechanic}
-                onChange={e => setSelectedMechanic(e.target.value)}
-                className={inputCls}
-              >
-                <option value="">— Select Mechanic —</option>
-                {mechanics.map(m => (
-                  <option key={m.id} value={String(m.id)}>
-                    {m.fullname} {m.commission_percent > 0 ? `(${m.commission_percent}%)` : ""}
-                  </option>
-                ))}
-              </select>
+              <label className={labelCls}>
+                <UserCog size={13} className="text-purple-400" />
+                Mechanic <span className="text-red-400">*</span>
+              </label>
+              <SearchableSelect
+                value={selectedMechanic || null}
+                options={mechanics.map((m) => ({
+                  id: m.id,
+                  label: m.fullname,
+                  sub:
+                    (userRole === "admin" || userRole === "developer") && m.commission_percent > 0
+                      ? `${m.commission_percent}% commission`
+                      : undefined,
+                }))}
+                onSelect={(id) => setSelectedMechanic(id)}
+                placeholder="— Select Mechanic —"
+                searchPlaceholder="Mechanic ka naam type karo…"
+                emptyText="Koi mechanic nahi mila"
+              />
             </div>
           </div>
         </div>
@@ -900,81 +1038,126 @@ export default function ManageJobPage({
           </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className={labelCls}><Smartphone size={13} className="text-blue-400" />Item / Model <span className="text-red-400">*</span></label>
-              <input value={item} onChange={e => setItem(e.target.value)} placeholder="e.g. iPhone 15 Pro, Samsung S24" className={inputCls} />
+              <label className={labelCls}>
+                <Smartphone size={13} className="text-blue-400" />
+                Item / Model <span className="text-red-400">*</span>
+              </label>
+              <input
+                value={item}
+                onChange={(e) => setItem(e.target.value)}
+                placeholder="e.g. iPhone 15 Pro, Samsung S24"
+                className={inputCls}
+              />
             </div>
             <div>
-              <label className={labelCls}><AlertCircle size={13} className="text-red-400" />Fault Reported <span className="text-red-400">*</span></label>
-              <input value={fault} onChange={e => setFault(e.target.value)} placeholder="e.g. Screen broken, Not charging" className={inputCls} />
+              <label className={labelCls}>
+                <AlertCircle size={13} className="text-red-400" />
+                Fault Reported <span className="text-red-400">*</span>
+              </label>
+              <input
+                value={fault}
+                onChange={(e) => setFault(e.target.value)}
+                placeholder="e.g. Screen broken, Not charging"
+                className={inputCls}
+              />
             </div>
             <div>
-              <label className={labelCls}><MapPin size={13} className="text-amber-400" />Location / Rack</label>
-              <input value={uniqId} onChange={e => setUniqId(e.target.value)} placeholder="e.g. Shelf A3, Counter 2" className={inputCls} />
+              <label className={labelCls}>
+                <MapPin size={13} className="text-amber-400" />
+                Location / Spot
+              </label>
+              <JobSpotPicker
+                value={locId}
+                onSelect={(id, spot) => {
+                  setLocId(id);
+                  setLocName(spot?.name || "");
+                }}
+              />
             </div>
             <div>
-              <label className={labelCls}><MessageSquare size={13} className="text-slate-600" />Remarks</label>
-              <input value={remark} onChange={e => setRemark(e.target.value)} placeholder="Any additional notes…" className={inputCls} />
+              <label className={labelCls}>
+                <MessageSquare size={13} className="text-slate-600" />
+                Remarks
+              </label>
+              <input
+                value={remark}
+                onChange={(e) => setRemark(e.target.value)}
+                placeholder="Any additional notes…"
+                className={inputCls}
+              />
             </div>
           </div>
         </div>
 
         {/* ── SECTION 3: SERVICES + PRODUCTS ───────────────────────── */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-
           {/* SERVICES */}
           <div className="bg-[#161b27] rounded-2xl border border-[#21293d] p-5">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <Wrench size={15} className="text-blue-400" />
-                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Services</p>
+                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+                  Services
+                </p>
               </div>
-              <span className="text-[10px] font-black text-blue-400">Total: {inr(serviceTotal)}</span>
+              <span className="text-[10px] font-black text-blue-400">
+                Total: {inr(serviceTotal)}
+              </span>
             </div>
 
             {/* Add service */}
-            <div className="flex gap-2 mb-3">
-              <select value={selService} onChange={e => setSelService(e.target.value)} className={`${inputCls} flex-1 text-xs`}>
-                <option value="">— Service select karo —</option>
-                {services.map(s => (
-                  <option key={s.id} value={String(s.id)}>
-                    {s.name} ({inr(s.price)})
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button" onClick={addService}
-                className="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-sm font-black transition-all flex-shrink-0"
-              >
-                <Plus size={15} />
-              </button>
+            <div className="mb-3">
+              <SearchableSelect
+                value={null}
+                options={services.map((s) => ({ id: s.id, label: s.name, sub: inr(s.price) }))}
+                onSelect={(id) => addService(parseInt(id))}
+                placeholder="— Service search karke select karo —"
+                searchPlaceholder="Service ka naam type karo…"
+                emptyText="Koi service nahi mili"
+              />
             </div>
 
             {/* Service table */}
             <div className="space-y-0 border border-[#21293d] rounded-xl overflow-hidden">
               <div className="grid grid-cols-[1fr_90px_36px] bg-[#111520] px-3 py-2">
-                <span className="text-[9px] font-black uppercase tracking-wider text-slate-600">Service</span>
-                <span className="text-[9px] font-black uppercase tracking-wider text-slate-600 text-right">Amount</span>
+                <span className="text-[9px] font-black uppercase tracking-wider text-slate-600">
+                  Service
+                </span>
+                <span className="text-[9px] font-black uppercase tracking-wider text-slate-600 text-right">
+                  Amount
+                </span>
                 <span />
               </div>
               {serviceRows.length === 0 ? (
-                <div className="px-3 py-6 text-center text-slate-700 text-xs">Koi service add nahi ki</div>
-              ) : serviceRows.map(r => (
-                <div key={r.tempId} className="grid grid-cols-[1fr_90px_36px] items-center px-3 py-2 border-t border-[#21293d] hover:bg-white/[0.02]">
-                  <input
-                    value={r.service_name ?? ""}
-                    onChange={e => updateServiceName(r.tempId, e.target.value)}
-                    className="bg-transparent text-white text-sm font-medium outline-none focus:text-blue-300 transition-colors w-full"
-                  />
-                  <input
-                    type="number" value={r.price ?? 0}
-                    onChange={e => updateServicePrice(r.tempId, e.target.value)}
-                    className="bg-transparent text-emerald-400 text-sm font-black text-right outline-none focus:text-emerald-300 transition-colors w-full"
-                  />
-                  <button onClick={() => removeService(r.tempId)} className="flex justify-end text-slate-700 hover:text-red-400 transition-colors">
-                    <Trash2 size={13} />
-                  </button>
+                <div className="px-3 py-6 text-center text-slate-700 text-xs">
+                  Koi service add nahi ki
                 </div>
-              ))}
+              ) : (
+                serviceRows.map((r) => (
+                  <div
+                    key={r.tempId}
+                    className="grid grid-cols-[1fr_90px_36px] items-center px-3 py-2 border-t border-[#21293d] hover:bg-white/[0.02]"
+                  >
+                    <input
+                      value={r.service_name ?? ""}
+                      onChange={(e) => updateServiceName(r.tempId, e.target.value)}
+                      className="bg-transparent text-white text-sm font-medium outline-none focus:text-blue-300 transition-colors w-full"
+                    />
+                    <input
+                      type="number"
+                      value={r.price ?? 0}
+                      onChange={(e) => updateServicePrice(r.tempId, e.target.value)}
+                      className="bg-transparent text-emerald-400 text-sm font-black text-right outline-none focus:text-emerald-300 transition-colors w-full"
+                    />
+                    <button
+                      onClick={() => removeService(r.tempId)}
+                      className="flex justify-end text-slate-700 hover:text-red-400 transition-colors"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 
@@ -983,62 +1166,144 @@ export default function ManageJobPage({
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <Package size={15} className="text-emerald-400" />
-                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Products</p>
+                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+                  Products
+                </p>
               </div>
-              <span className="text-[10px] font-black text-emerald-400">Total: {inr(productTotal)}</span>
+              <span className="text-[10px] font-black text-emerald-400">
+                Total: {inr(productTotal)}
+              </span>
             </div>
 
             {/* Add product */}
-            <div className="flex gap-2 mb-3">
-              <select value={selProduct} onChange={e => setSelProduct(e.target.value)} className={`${inputCls} flex-1 text-xs`}>
-                <option value="">— Product select karo —</option>
-                {products.map(p => (
-                  <option key={p.id} value={String(p.id)} disabled={p.available_stock <= 0}>
-                    {p.name} ({inr(p.price)}) — Stock: {p.available_stock}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button" onClick={addProduct}
-                className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-black transition-all flex-shrink-0"
-              >
-                <Plus size={15} />
-              </button>
+            <div className="mb-3">
+              <SearchableSelect
+                value={null}
+                options={products.map((p) => ({
+                  id: p.id,
+                  label: p.name,
+                  sub: `${inr(p.price)} — ${p.available_stock > 0 ? `Stock: ${p.available_stock}` : "Stock khatam"}`,
+                }))}
+                onSelect={(id) => addProduct(parseInt(id))}
+                placeholder="— Product search karke select karo —"
+                searchPlaceholder="Product ka naam type karo…"
+                emptyText="Koi product nahi mila"
+              />
             </div>
+
+            {/* Custom spare — inventory me nahi, alag se add */}
+            {!showCustom ? (
+              <button
+                type="button"
+                onClick={() => setShowCustom(true)}
+                className="w-full mb-3 text-xs bg-slate-600/10 text-slate-400 border border-dashed border-slate-600/40 px-3 py-2 rounded-xl hover:text-emerald-300 hover:border-emerald-500/40 transition-all inline-flex items-center justify-center gap-1.5"
+              >
+                <Plus size={13} /> Custom spare add karo (inventory se alag)
+              </button>
+            ) : (
+              <div className="mb-3 border border-[#21293d] rounded-xl bg-[#111520] p-3 grid grid-cols-1 sm:grid-cols-[1fr_90px_120px_auto] gap-2 items-end">
+                <div>
+                  <label className={labelCls}>Spare naam *</label>
+                  <input
+                    value={customName}
+                    onChange={(e) => setCustomName(e.target.value)}
+                    placeholder="e.g. SMPS Board, Belt..."
+                    className={inputCls}
+                  />
+                </div>
+                <div>
+                  <label className={labelCls}>Price</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={customPrice}
+                    onChange={(e) => setCustomPrice(e.target.value)}
+                    placeholder="0"
+                    className={inputCls}
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={addProductCustom}
+                    className="bg-emerald-600/20 text-emerald-300 border border-emerald-600/40 px-3 py-2 rounded-xl hover:bg-emerald-600/30 transition-all text-xs font-bold inline-flex items-center gap-1"
+                  >
+                    <Plus size={12} /> Add
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowCustom(false);
+                      setCustomName("");
+                      setCustomPrice("");
+                    }}
+                    className="text-slate-500 hover:text-red-400 text-xs px-2 py-2"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Product table */}
             <div className="space-y-0 border border-[#21293d] rounded-xl overflow-hidden">
               <div className="grid grid-cols-[1fr_50px_80px_80px_36px] bg-[#111520] px-3 py-2">
-                {["Product","Qty","Price","Total",""].map(h => (
-                  <span key={h} className="text-[9px] font-black uppercase tracking-wider text-slate-600 last:col-span-1">{h}</span>
+                {["Product", "Qty", "Price", "Total", ""].map((h) => (
+                  <span
+                    key={h}
+                    className="text-[9px] font-black uppercase tracking-wider text-slate-600 last:col-span-1"
+                  >
+                    {h}
+                  </span>
                 ))}
               </div>
               {productRows.length === 0 ? (
-                <div className="px-3 py-6 text-center text-slate-700 text-xs">Koi product add nahi kiya</div>
-              ) : productRows.map(r => {
-                const stock = products.find(p => p.id === r.product_id)?.available_stock ?? 0;
-                const overStock = !isEdit && r.qty > stock;
-                return (
-                  <div key={r.tempId} className={`grid grid-cols-[1fr_50px_80px_80px_36px] items-center px-3 py-2 border-t border-[#21293d] hover:bg-white/[0.02] ${overStock ? "bg-red-500/5" : ""}`}>
-                    <span className="text-white text-xs font-medium truncate" title={r.product_name}>{r.product_name}</span>
-                    <input
-                      type="number" min={1} max={isEdit ? undefined : stock}
-                      value={r.qty ?? 1}
-                      onChange={e => updateProductQty(r.tempId, e.target.value)}
-                      className={`bg-transparent text-center text-sm font-black outline-none w-full transition-colors ${overStock ? "text-red-400" : "text-white"}`}
-                    />
-                    <input
-                      type="number" step="0.01" value={r.price ?? 0}
-                      onChange={e => updateProductPrice(r.tempId, e.target.value)}
-                      className="bg-transparent text-right text-sm font-medium text-slate-300 outline-none w-full"
-                    />
-                    <span className="text-emerald-400 text-xs font-black text-right pr-1">{inr(r.qty * r.price)}</span>
-                    <button onClick={() => removeProduct(r.tempId)} className="flex justify-end text-slate-700 hover:text-red-400 transition-colors">
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                );
-              })}
+                <div className="px-3 py-6 text-center text-slate-700 text-xs">
+                  Koi product add nahi kiya
+                </div>
+              ) : (
+                productRows.map((r) => {
+                  const stock = products.find((p) => p.id === r.product_id)?.available_stock ?? 0;
+                  const overStock = !isEdit && r.product_id != null && r.qty > stock;
+                  return (
+                    <div
+                      key={r.tempId}
+                      className={`grid grid-cols-[1fr_50px_80px_80px_36px] items-center px-3 py-2 border-t border-[#21293d] hover:bg-white/[0.02] ${overStock ? "bg-amber-500/5" : ""}`}
+                    >
+                      <span
+                        className="text-white text-xs font-medium truncate"
+                        title={r.product_name}
+                      >
+                        {r.product_name}
+                      </span>
+                      <input
+                        type="number"
+                        min={1}
+                        value={r.qty ?? 1}
+                        onChange={(e) => updateProductQty(r.tempId, e.target.value)}
+                        className={`bg-transparent text-center text-sm font-black outline-none w-full transition-colors ${overStock ? "text-amber-400" : "text-white"}`}
+                      />
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={r.price ?? 0}
+                        onChange={(e) => updateProductPrice(r.tempId, e.target.value)}
+                        className="bg-transparent text-right text-sm font-medium text-slate-300 outline-none w-full"
+                      />
+                      <span className="text-emerald-400 text-xs font-black text-right pr-1">
+                        {inr(r.qty * r.price)}
+                      </span>
+                      <button
+                        onClick={() => removeProduct(r.tempId)}
+                        className="flex justify-end text-slate-700 hover:text-red-400 transition-colors"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>
@@ -1046,44 +1311,53 @@ export default function ManageJobPage({
         {/* ── SECTION 4: TOTALS + COMMISSION ────────────────────────── */}
         <div className="bg-[#161b27] rounded-2xl border border-[#21293d] p-5">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
-
             {/* Grand Total */}
             <div className="bg-gradient-to-br from-blue-600/15 to-blue-800/10 border border-blue-500/20 rounded-2xl px-6 py-4 flex items-center justify-between">
               <div>
-                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Total Payable</p>
+                <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">
+                  Total Payable
+                </p>
                 <div className="flex items-baseline gap-1 mt-1">
                   <span className="text-slate-500 text-sm">₹</span>
-                  <span className="text-3xl font-black text-white">{grandTotal.toLocaleString("en-IN")}</span>
+                  <span className="text-3xl font-black text-white">
+                    {grandTotal.toLocaleString("en-IN")}
+                  </span>
                 </div>
                 <div className="flex gap-3 mt-1">
                   <span className="text-[10px] text-blue-400">Services: {inr(serviceTotal)}</span>
-                  <span className="text-[10px] text-emerald-400">Products: {inr(productTotal)}</span>
+                  <span className="text-[10px] text-emerald-400">
+                    Products: {inr(productTotal)}
+                  </span>
                 </div>
               </div>
               <IndianRupee className="text-blue-500/30" size={48} strokeWidth={1.5} />
             </div>
 
-            {/* Mechanic Commission */}
-            <div>
-              <label className={labelCls}>Mechanic Commission (₹)</label>
-              <div className="relative">
-                <input
-                  type="number" step="0.01" min="0"
-                  value={commissionAmt ?? "0"}
-                  onChange={e => setCommissionAmt(e.target.value)}
-                  className={inputCls}
-                  placeholder="0.00"
-                />
-                {(() => {
-  const mech = mechanics.find(m => m.id === parseInt(selectedMechanic));
-  return selectedMechanic && mech && mech.commission_percent > 0 ? (
-    <p className="text-[9px] text-slate-600 mt-1">
-      Auto: {mech.commission_percent}% of grand total
-    </p>
-  ) : null;
-})()}
+            {/* Mechanic Commission — admin/developer only */}
+            {(userRole === "admin" || userRole === "developer") && (
+              <div>
+                <label className={labelCls}>Mechanic Commission (₹)</label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={commissionAmt ?? "0"}
+                    onChange={(e) => setCommissionAmt(e.target.value)}
+                    className={inputCls}
+                    placeholder="0.00"
+                  />
+                  {(() => {
+                    const mech = mechanics.find((m) => m.id === parseInt(selectedMechanic));
+                    return selectedMechanic && mech && mech.commission_percent > 0 ? (
+                      <p className="text-[9px] text-slate-600 mt-1">
+                        Auto: {mech.commission_percent}% of services total
+                      </p>
+                    ) : null;
+                  })()}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
 
@@ -1098,18 +1372,25 @@ export default function ManageJobPage({
                 : "bg-blue-600 hover:bg-blue-500 shadow-blue-600/20"
             }`}
           >
-            {saving
-              ? <><Loader2 size={17} className="animate-spin" />Saving…</>
-              : <><Save size={17} strokeWidth={2.5} />{isEdit ? "Update Job" : "Create Job"}</>}
+            {saving ? (
+              <>
+                <Loader2 size={17} className="animate-spin" />
+                Saving…
+              </>
+            ) : (
+              <>
+                <Save size={17} strokeWidth={2.5} />
+                {isEdit ? "Update Job" : "Create Job"}
+              </>
+            )}
           </button>
-          <Link
-            href={isEdit ? `/jobs/${jobId}/view` : "/jobs"}
-            className="px-6 py-3.5 bg-[#111520] border border-[#21293d] hover:border-slate-500 text-slate-400 hover:text-white rounded-2xl font-bold text-sm transition-all no-underline"
+          <button
+            onClick={() => safeBack(router, "/jobs")}
+            className="px-6 py-3.5 bg-[#111520] border border-[#21293d] hover:border-slate-500 text-slate-400 hover:text-white rounded-2xl font-bold text-sm transition-all"
           >
             Cancel
-          </Link>
+          </button>
         </div>
-
       </div>
     </div>
   );
